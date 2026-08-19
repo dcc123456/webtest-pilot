@@ -382,7 +382,15 @@ bridge/         本地 Node 服务 + CLI
 tests/          vitest
 ```
 
-测试用 `FakeDriver` 替换真实浏览器，所以 runner 和 agent 的逻辑（含重试、超时、断言判定）都能在没有 Chrome 的情况下验证。
+测试用 `FakeDriver` 替换真实浏览器，所以 runner 和 agent 的逻辑（含重试、超时、断言判定）都能在没有 Chrome 的情况下验证。当前 **767 个测试**，其中 bridge 的 94 个是真实集成测试（真起服务 + 真 WebSocket 客户端模拟插件）。
+
+三条最关键的安全保证都做了「变异测试」验证——故意破坏实现后，对应测试确实会失败：
+
+| 保证 | 破坏后失败的测试数 |
+|---|---|
+| 注入内核不依赖闭包（`new Function(runOp.toString())`） | 5 |
+| 站点白名单失败即拒绝（`checkUrlAllowed`） | 5 |
+| 声称通过必须有断言支撑（`validateVerdict`） | 2 |
 
 ---
 
