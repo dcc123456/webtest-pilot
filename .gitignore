@@ -1,0 +1,13 @@
+node_modules/
+dist/
+dist-*/
+.vite/
+*.log
+*.tsbuildinfo
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+coverage/
+# Local bridge state: generated auth token, run history, screenshots.
+.webtest-pilot/
