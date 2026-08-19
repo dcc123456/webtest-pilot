@@ -444,36 +444,46 @@ export class ChromeDriver implements Driver {
 }
 
 /**
- * Creates the window a run executes in.
+ * Opens a tab for a run that has no usable current page.
  *
- * Deliberately `focused: false`, so a scheduled run at 3am does not steal focus
- * from whatever the user is doing — while still being rendered, which a
- * minimized window would not be, and `captureVisibleTab` needs rendering.
+ * A tab in the user's own window, deliberately not a new window: the whole point
+ * of this tool is to drive the browser the user already has, so a run inherits
+ * their logged-in session and existing data. A separate window would still share
+ * the profile's cookies, but it starts blank and adds a window to their desktop
+ * for no benefit.
+ *
+ * `active: false` so an unattended run does not yank the foreground tab away
+ * mid-sentence. The tab still renders, which `captureVisibleTab` needs.
  */
-export async function openRunWindow(startUrl?: string): Promise<{ windowId: number; tabId: number }> {
-  const created = await chrome.windows.create({
+export async function openRunTab(startUrl?: string): Promise<{ tabId: number; windowId?: number }> {
+  const created = await chrome.tabs.create({
     ...(startUrl ? { url: startUrl } : {}),
-    focused: false,
-    type: 'normal',
-    width: 1280,
-    height: 900,
+    active: false,
   })
-  const windowId = created?.id
-  const tab = created?.tabs?.[0]
-  if (typeof windowId !== 'number' || !tab || typeof tab.id !== 'number') {
-    throw new DriverError('Could not open a window for the run.')
+  if (typeof created.id !== 'number') {
+    throw new DriverError('Could not open a tab for the run.')
   }
-  return { windowId, tabId: tab.id }
+  return { tabId: created.id, ...(typeof created.windowId === 'number' ? { windowId: created.windowId } : {}) }
 }
 
-/** Closes a run window, ignoring the case where the user already closed it. */
-export async function closeRunWindow(windowId: number | undefined): Promise<void> {
-  if (typeof windowId !== 'number') return
+/** Closes a tab the run opened, ignoring one the user already closed. */
+export async function closeRunTab(tabId: number | undefined): Promise<void> {
+  if (typeof tabId !== 'number') return
   try {
-    await chrome.windows.remove(windowId)
+    await chrome.tabs.remove(tabId)
   } catch {
     /* already gone */
   }
+}
+
+/**
+ * True when this tab can host a run.
+ *
+ * Exported so the orchestrator can re-check a tab it was handed, rather than
+ * duplicating the rule.
+ */
+export function isUsableTab(tab: { id?: number; url?: string } | undefined): boolean {
+  return Boolean(tab && typeof tab.id === 'number' && isAutomatableUrl(tab.url))
 }
 
 /**

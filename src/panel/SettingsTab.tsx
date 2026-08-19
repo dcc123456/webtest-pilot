@@ -546,13 +546,6 @@ function PolicySection({ worker }: { worker: WorkerApi }) {
 
   return (
     <>
-      <Toggle
-        label='手动运行时打开独立窗口'
-        hint='默认关闭：直接在你当前的标签页上测试，保留已登录的会话。开启后每次手动运行会新开一个窗口（会从空白页开始，登录态不会带过去）。定时任务和本地接口触发的运行始终使用独立窗口，不受此开关影响。'
-        checked={policy.useDedicatedWindow}
-        onChange={(value) => patch({ useDedicatedWindow: value })}
-      />
-
       {/* Numeric inputs commit on blur, not on change: saving per keystroke would
           send a settings write for every digit typed, and a half-typed "1" would
           briefly become a 1ms timeout. */}

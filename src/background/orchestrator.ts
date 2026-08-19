@@ -54,7 +54,7 @@ import {
   type Verdict,
 } from './agent'
 import { NotAllowedError, type Driver, type RunContext } from './driver'
-import { ChromeDriver, closeRunWindow, findUsableTab, openRunWindow } from './driver.chrome'
+import { ChromeDriver, closeRunTab, findUsableTab, openRunTab } from './driver.chrome'
 import { Recorder, suggestScriptName } from './recorder'
 import { runScript } from './runner'
 
@@ -89,16 +89,18 @@ export interface StartOptions {
 /** The browser-facing collaborators, injectable for tests. */
 export interface OrchestratorDeps {
   createDriver: (allowedSites: string[]) => Driver
-  openWindow: typeof openRunWindow
-  closeWindow: typeof closeRunWindow
+  /** Opens a tab in the user's own window, for a run with no usable page. */
+  openTab: typeof openRunTab
+  /** Closes only a tab this run opened; the user's own tabs are never closed. */
+  closeTab: typeof closeRunTab
   findTab: typeof findUsableTab
 }
 
 /** The real implementations, used unless a caller injects otherwise. */
 const chromeDeps: OrchestratorDeps = {
   createDriver: (allowedSites) => new ChromeDriver(allowedSites),
-  openWindow: openRunWindow,
-  closeWindow: closeRunWindow,
+  openTab: openRunTab,
+  closeTab: closeRunTab,
   findTab: findUsableTab,
 }
 
@@ -162,18 +164,16 @@ export async function startRun(options: StartOptions): Promise<RunOutcome> {
   options.observer?.onRun?.(run)
 
   let context: RunContext | undefined
-  let ownWindow: number | undefined
+  let ownTab: number | undefined
   const deps = options.deps ?? chromeDeps
 
   try {
-    // A manual run targets the tab the user is looking at; an unattended one must
-    // not. A schedule firing at 3am would otherwise navigate away from whatever
-    // the user left open — losing their work to a test they cannot see — and a
-    // bridge run from CI has no "current tab" to mean anything in the first place.
-    const dedicated = options.trigger === 'manual' ? policy.useDedicatedWindow : true
-    const opened = await openContext(dedicated, startUrl, deps, policy.allowedSites)
+    // Every run drives the user's own browser: that is the point of shipping this
+    // as an extension rather than a Playwright script. The session, cookies and
+    // data they already have are inherited, so nothing has to log in first.
+    const opened = await openContext(startUrl, deps, policy.allowedSites)
     context = opened.context
-    ownWindow = opened.ownWindow
+    ownTab = opened.ownTab
 
     const driver = deps.createDriver(policy.allowedSites)
     const outcome = useScript
@@ -201,9 +201,11 @@ export async function startRun(options: StartOptions): Promise<RunOutcome> {
     options.observer?.onStatus?.(runId, status, message)
     return { run: finished }
   } finally {
-    // A leaked window per scheduled run would fill the desktop overnight, so
-    // this runs even when the run threw.
-    await deps.closeWindow(ownWindow)
+    // Closes only a tab this run opened itself — never the user's own tab, which
+    // they were using before the run and expect to still be there after it.
+    // A leaked tab per scheduled run would fill their tab strip overnight, so this
+    // runs even when the run threw.
+    await deps.closeTab(ownTab)
   }
 }
 
@@ -214,75 +216,62 @@ async function resolveScript(options: StartOptions): Promise<TestScript | undefi
 }
 
 /**
- * Establishes the tab a run drives.
+ * Establishes the tab a run drives, always inside the user's own browser.
  *
- * Reusing the current tab is the default, because "test the page I am looking at"
- * is the common case and it keeps the session the user set up by hand. Unattended
- * triggers get their own window instead, with `focused: false` so a 3am run does
- * not steal the screen.
+ * This is an extension, so it takes over the browser the user already has: their
+ * session, cookies and data come along, and nothing needs to log in first. No run
+ * ever opens a window — not even a scheduled one, which would add a window to
+ * their desktop for no benefit, since a separate window shares the same profile
+ * anyway.
  *
- * Either way this refuses to hand back a tab the run cannot act on. Returning one
- * would produce a failure at step 0 phrased as a tooling fault, which tells the
- * user nothing about the actual problem: they are sitting on a new-tab page.
+ * The current tab is the first choice for every trigger. Only when it cannot host
+ * the run does this fall back to a background tab in the same window, which is
+ * closed at the end. That fallback needs a URL to be worth anything: a blank tab
+ * is a new-tab page, which no extension may script.
  */
 async function openContext(
-  useDedicatedWindow: boolean,
   startUrl: string,
   deps: OrchestratorDeps,
   allowedSites: string[],
-): Promise<{ context: RunContext; ownWindow?: number }> {
-  if (useDedicatedWindow) {
-    // Without a URL, `windows.create` lands on chrome://newtab, which no
-    // extension may script. A run with nowhere to go must say so up front.
-    if (!startUrl.trim()) {
-      throw new StartError(
-        '这次运行需要一个起始地址，但用例里没有写。\n\n' +
-          '定时任务和本地接口触发的运行会新开一个窗口，新窗口停在浏览器新标签页上，' +
-          '而扩展无法操作新标签页。\n\n' +
-          '请在用例里补上地址，例如 Markdown 用例加一行 `- url: https://your-site.com/login`，' +
-          '或在对话里直接说明要打开哪个页面。',
-      )
-    }
-    const opened = await deps.openWindow(startUrl)
-    return { context: { tabId: opened.tabId, windowId: opened.windowId }, ownWindow: opened.windowId }
-  }
+): Promise<{ context: RunContext; ownTab?: number }> {
   const tab = await deps.findTab(startUrl)
-  if (!tab) {
-    // A start URL rescues this case: the run can navigate the current tab there,
-    // even from a new-tab page. Opening a window would contradict the user's
-    // "run in the current tab" setting, so ask rather than decide for them.
-    if (startUrl.trim()) {
-      throw new StartError(
-        `当前标签页是浏览器内部页面（如新标签页、chrome:// 页面、扩展页），扩展无法在上面操作。\n\n` +
-          `这个用例的起始地址是 ${startUrl.trim()}。请先在当前标签页手动打开它（或任意一个普通网页），再重新运行；\n` +
-          `也可以在「设置 → 手动运行时打开独立窗口」里改成新开窗口，那样插件会自己导航过去。`,
-      )
+  if (tab) {
+    // Check the page against the allow-list now, while we can name it and suggest
+    // a pattern. Leaving it to the first action would surface the same refusal
+    // several steps later, phrased as a mid-run failure. With a start URL the run
+    // navigates away first, so the navigation's own check is the one that counts.
+    if (!startUrl.trim()) {
+      const verdict = checkUrlAllowed(tab.url, allowedSites)
+      if (!verdict.allowed) {
+        const suggestion = suggestPattern(tab.url)
+        throw new StartError(
+          `当前页面不在站点白名单里，插件不会对它做任何操作。\n\n` +
+            `当前页面：${tab.url}\n` +
+            (suggestion
+              ? `请到「设置 → 站点白名单」加上这一行，然后重新运行：\n${suggestion}`
+              : `请到「设置 → 站点白名单」把这个站点加进去，然后重新运行。`),
+        )
+      }
     }
-    throw new StartError(
-      '当前标签页是浏览器内部页面（如新标签页、chrome:// 页面、扩展页），扩展无法在上面操作。\n\n' +
-        '请先打开你要测试的网页，再回到侧边栏运行；\n' +
-        '或者在用例里写明起始地址（Markdown 用例加一行 `- url: https://your-site.com/`，' +
-        '对话里直接说要打开哪个页面也可以）。',
-    )
+    return { context: { tabId: tab.id, windowId: tab.windowId } }
   }
 
-  // Check the page against the allow-list now, while we can name it and suggest a
-  // pattern. Leaving it to the first action would surface the same refusal several
-  // steps later, phrased as a mid-run failure.
-  if (!startUrl.trim()) {
-    const verdict = checkUrlAllowed(tab.url, allowedSites)
-    if (!verdict.allowed) {
-      const suggestion = suggestPattern(tab.url)
-      throw new StartError(
-        `当前页面不在站点白名单里，插件不会对它做任何操作。\n\n` +
-          `当前页面：${tab.url}\n` +
-          (suggestion
-            ? `请到「设置 → 站点白名单」加上这一行，然后重新运行：\n${suggestion}`
-            : `请到「设置 → 站点白名单」把这个站点加进去，然后重新运行。`),
-      )
+  // No usable page. With a URL we can still stay inside the user's browser by
+  // opening a background tab there — it inherits the same logged-in session.
+  if (startUrl.trim()) {
+    const opened = await deps.openTab(startUrl)
+    return {
+      context: { tabId: opened.tabId, ...(opened.windowId ? { windowId: opened.windowId } : {}) },
+      ownTab: opened.tabId,
     }
   }
-  return { context: { tabId: tab.id, windowId: tab.windowId } }
+
+  throw new StartError(
+    '当前标签页是浏览器内部页面（如新标签页、chrome:// 页面、扩展页），扩展无法在上面操作。\n\n' +
+      '请先打开你要测试的网页，再回到侧边栏运行；\n' +
+      '或者在用例里写明起始地址（Markdown 用例加一行 `- url: https://your-site.com/`，' +
+      '对话里直接说要打开哪个页面也可以），插件会在你当前的浏览器里打开一个后台标签页去跑。',
+  )
 }
 
 /** A ready-to-paste allow-list pattern covering a page's own origin. */

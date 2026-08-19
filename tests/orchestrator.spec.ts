@@ -21,24 +21,34 @@ let mod: typeof import('../src/background/orchestrator')
 let storage: typeof import('../src/lib/storage')
 
 /** Records window lifecycle so a leak is detectable. */
+/**
+ * Tracks how a run acquired its tab.
+ *
+ * `openedTab` counting anything means the run could not use the page the user was
+ * already on. No run may ever open a *window* — the deps have no such hook, which
+ * is the structural guarantee.
+ */
 class WindowTracker {
-  opened = 0
+  openedTab = 0
   reusedTab = 0
   closed: (number | undefined)[] = []
   failOpen: Error | undefined
+  /** When set, `findTab` reports no usable page, forcing the fallback. */
+  noUsableTab = false
 
   deps(driver: FakeDriver): OrchestratorDeps {
     return {
       createDriver: () => driver,
-      openWindow: async () => {
+      openTab: async () => {
         if (this.failOpen) throw this.failOpen
-        this.opened += 1
-        return { tabId: 1, windowId: 10 }
+        this.openedTab += 1
+        return { tabId: 99, windowId: 10 }
       },
-      closeWindow: async (windowId) => {
-        this.closed.push(windowId)
+      closeTab: async (tabId) => {
+        this.closed.push(tabId)
       },
       findTab: async () => {
+        if (this.noUsableTab) return undefined
         this.reusedTab += 1
         return { id: 1, url: 'https://app.test/', title: 'App', active: true, windowId: 10 }
       },
@@ -101,7 +111,7 @@ describe('the allow-list gate', () => {
       mod.startRun({ testCase: testCase(), trigger: 'schedule', deps: tracker.deps(new FakeDriver()) }),
     ).rejects.toThrow(mod.StartError)
     // Nothing may open before the boundary is checked.
-    expect(tracker.opened).toBe(0)
+    expect(tracker.openedTab).toBe(0)
   })
 
   it('names the setting and gives an example, since this is the first thing users hit', async () => {
@@ -125,40 +135,47 @@ describe('the allow-list gate', () => {
   })
 })
 
-describe('a window the run opened itself is always closed', () => {
-  // These use `schedule`, which always opens its own window. A manual run reuses
-  // the user's tab and must leave it alone, which is covered separately.
+describe('a tab the run opened itself is always closed', () => {
+  // These force the fallback path (`noUsableTab`), which is the only way a run
+  // acquires a tab of its own. A run that reused the user's tab must leave it
+  // open, which is covered separately.
+  function ownTabTracker(): WindowTracker {
+    const tracker = new WindowTracker()
+    tracker.noUsableTab = true
+    return tracker
+  }
+
   it('closes it after a passing script replay', async () => {
     await allowSite()
-    const tracker = new WindowTracker()
+    const tracker = ownTabTracker()
     await mod.startRun({ script: script(), trigger: 'schedule', deps: tracker.deps(new FakeDriver()) })
-    expect(tracker.closed).toEqual([10])
+    expect(tracker.closed).toEqual([99])
   })
 
   it('closes it when a step fails', async () => {
     await allowSite()
-    const tracker = new WindowTracker()
+    const tracker = ownTabTracker()
     const driver = new FakeDriver().program('click', { kind: 'failed', error: 'is disabled' })
     await mod.startRun({ script: script(), trigger: 'schedule', deps: tracker.deps(driver) })
-    expect(tracker.closed).toEqual([10])
+    expect(tracker.closed).toEqual([99])
   })
 
   it('closes it when the driver throws outright', async () => {
     await allowSite()
-    const tracker = new WindowTracker()
+    const tracker = ownTabTracker()
     const driver = new FakeDriver().program('click', {
       kind: 'throw',
       error: new Error('the tab went away'),
     })
     await mod.startRun({ script: script(), trigger: 'schedule', deps: tracker.deps(driver) })
-    // The leak this prevents: one orphaned window per nightly run.
-    expect(tracker.closed).toEqual([10])
+    // The leak this prevents: one orphaned tab per nightly run.
+    expect(tracker.closed).toEqual([99])
   })
 
-  it('does not try to close a window that never opened', async () => {
+  it('does not try to close a tab that never opened', async () => {
     await allowSite()
-    const tracker = new WindowTracker()
-    tracker.failOpen = new Error('no window available')
+    const tracker = ownTabTracker()
+    tracker.failOpen = new Error('no tab available')
     const outcome = await mod.startRun({
       script: script(),
       trigger: 'schedule',
@@ -291,11 +308,12 @@ describe('agent mode without a provider', () => {
     expect(outcome.run.summary).toContain('provider')
   })
 
-  it('still closes the window', async () => {
+  it('still closes a tab it opened', async () => {
     await allowSite()
     const tracker = new WindowTracker()
+    tracker.noUsableTab = true
     await mod.startRun({ testCase: testCase(), trigger: 'schedule', deps: tracker.deps(new FakeDriver()) })
-    expect(tracker.closed).toEqual([10])
+    expect(tracker.closed).toEqual([99])
   })
 })
 
@@ -314,18 +332,19 @@ describe('cancellation', () => {
     expect(outcome.run.status).toBe('cancelled')
   })
 
-  it('closes the window on cancellation too', async () => {
+  it('closes its own tab on cancellation too', async () => {
     await allowSite()
     const controller = new AbortController()
     controller.abort()
     const tracker = new WindowTracker()
+    tracker.noUsableTab = true
     await mod.startRun({
       script: script(),
       trigger: 'schedule',
       signal: controller.signal,
       deps: tracker.deps(new FakeDriver()),
     })
-    expect(tracker.closed).toEqual([10])
+    expect(tracker.closed).toEqual([99])
   })
 })
 
@@ -346,46 +365,61 @@ describe('a policy violation mid-run', () => {
   })
 })
 
-describe('choosing between the current tab and a fresh window', () => {
-  it('reuses the current tab for a manual run, since that is the page the user means', async () => {
+describe('every run takes over the user\'s own browser', () => {
+  it.each(['manual', 'schedule', 'bridge'] as const)(
+    'reuses the current tab for a %s run, inheriting the logged-in session',
+    async (trigger) => {
+      await allowSite()
+      const tracker = new WindowTracker()
+      await mod.startRun({ script: script(), trigger, deps: tracker.deps(new FakeDriver()) })
+      expect(tracker.reusedTab).toBe(1)
+      expect(tracker.openedTab).toBe(0)
+      // Nothing was opened, so nothing may be closed: closing the user's own tab
+      // at the end of a run would be destructive.
+      expect(tracker.closed).toEqual([undefined])
+    },
+  )
+
+  it('opens a background tab, not a window, when no page can host the run', async () => {
     await allowSite()
     const tracker = new WindowTracker()
-    await mod.startRun({ script: script(), trigger: 'manual', deps: tracker.deps(new FakeDriver()) })
-    expect(tracker.reusedTab).toBe(1)
-    expect(tracker.opened).toBe(0)
-    // Nothing was opened, so nothing may be closed: closing the user's own tab
-    // at the end of a run would be destructive.
-    expect(tracker.closed).toEqual([undefined])
+    tracker.noUsableTab = true
+    await mod.startRun({
+      script: script({ startUrl: 'https://app.test/login' }),
+      trigger: 'schedule',
+      deps: tracker.deps(new FakeDriver()),
+    })
+    // A tab in the user's own window still inherits their session; a separate
+    // window would only add clutter to their desktop.
+    expect(tracker.openedTab).toBe(1)
   })
 
-  it('opens its own window for a schedule, whatever the setting says', async () => {
+  it('closes a tab it opened itself, so runs do not pile up tabs overnight', async () => {
     await allowSite()
-    const settings = await storage.getSettings()
-    await storage.saveSettings({ policy: { ...settings.policy, useDedicatedWindow: false } })
     const tracker = new WindowTracker()
-    await mod.startRun({ script: script(), trigger: 'schedule', deps: tracker.deps(new FakeDriver()) })
-    // A 3am run must not navigate away from whatever the user left open.
-    expect(tracker.opened).toBe(1)
-    expect(tracker.reusedTab).toBe(0)
-    expect(tracker.closed).toEqual([10])
+    tracker.noUsableTab = true
+    await mod.startRun({
+      script: script({ startUrl: 'https://app.test/login' }),
+      trigger: 'schedule',
+      deps: tracker.deps(new FakeDriver()),
+    })
+    expect(tracker.closed).toEqual([99])
   })
 
-  it('opens its own window for a bridge run, which has no current tab to speak of', async () => {
+  it('closes its own tab even when the run threw', async () => {
     await allowSite()
     const tracker = new WindowTracker()
-    await mod.startRun({ script: script(), trigger: 'bridge', deps: tracker.deps(new FakeDriver()) })
-    expect(tracker.opened).toBe(1)
-    expect(tracker.reusedTab).toBe(0)
-  })
-
-  it('honours the setting when a manual run asks for a dedicated window', async () => {
-    await allowSite()
-    const settings = await storage.getSettings()
-    await storage.saveSettings({ policy: { ...settings.policy, useDedicatedWindow: true } })
-    const tracker = new WindowTracker()
-    await mod.startRun({ script: script(), trigger: 'manual', deps: tracker.deps(new FakeDriver()) })
-    expect(tracker.opened).toBe(1)
-    expect(tracker.closed).toEqual([10])
+    tracker.noUsableTab = true
+    const driver = new FakeDriver()
+    driver.exec = async () => {
+      throw new Error('boom')
+    }
+    await mod.startRun({
+      script: script({ startUrl: 'https://app.test/login' }),
+      trigger: 'schedule',
+      deps: tracker.deps(driver),
+    })
+    expect(tracker.closed).toEqual([99])
   })
 })
 
@@ -467,45 +501,37 @@ describe('the agent opens the case start URL before the model runs', () => {
 })
 
 describe('refusing a run that has nowhere to go', () => {
-  // These end as an `error` run rather than a thrown rejection: the refusal
+  // This ends as an `error` run rather than a thrown rejection: the refusal
   // happens after the run is registered, so the reason lands in run history where
   // the user can actually read it, instead of vanishing into a console.
-  it('explains what to add when an unattended run has no start URL', async () => {
-    await allowSite()
-    // A dedicated window with no URL lands on chrome://newtab, which nothing can
-    // automate, so this must be refused up front rather than failing at step 0.
-    const outcome = await mod.startRun({
-      script: script({ startUrl: '' }),
-      trigger: 'schedule',
-      deps: new WindowTracker().deps(new FakeDriver()),
-    })
-    expect(outcome.run.status).toBe('error')
-    expect(outcome.run.summary).toMatch(/需要一个起始地址/)
-  })
-
-  it('tells the user to open a page when the current tab is browser-internal', async () => {
+  it('refuses when there is neither a usable page nor a URL to open', async () => {
     await allowSite()
     const tracker = new WindowTracker()
-    const deps = { ...tracker.deps(new FakeDriver()), findTab: async () => undefined }
+    tracker.noUsableTab = true
     const outcome = await mod.startRun({
       script: script({ startUrl: '' }),
       trigger: 'manual',
-      deps,
+      deps: tracker.deps(new FakeDriver()),
     })
     expect(outcome.run.status).toBe('error')
     expect(outcome.run.summary).toMatch(/浏览器内部页面/)
+    // Nothing to navigate to, so opening a blank tab would just be a new-tab page.
+    expect(tracker.openedTab).toBe(0)
   })
 
-  it('names the case start URL so the user knows which page to open', async () => {
+  it('opens a background tab instead of refusing when the case has a URL', async () => {
     await allowSite()
     const tracker = new WindowTracker()
-    const deps = { ...tracker.deps(new FakeDriver()), findTab: async () => undefined }
+    tracker.noUsableTab = true
     const outcome = await mod.startRun({
       script: script({ startUrl: 'https://app.test/checkout' }),
       trigger: 'manual',
-      deps,
+      deps: tracker.deps(new FakeDriver()),
     })
-    expect(outcome.run.summary).toContain('https://app.test/checkout')
+    // Staying inside the user's browser beats refusing: the tab inherits their
+    // session, so the run still needs no login.
+    expect(outcome.run.status).toBe('passed')
+    expect(tracker.openedTab).toBe(1)
   })
 })
 

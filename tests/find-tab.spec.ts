@@ -10,7 +10,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { findUsableTab } from '../src/background/driver.chrome'
+import { closeRunTab, findUsableTab, openRunTab } from '../src/background/driver.chrome'
 
 interface FakeTab {
   id?: number
@@ -154,5 +154,72 @@ describe('with a start URL', () => {
   it('refuses rather than throwing when the start URL is unparseable', async () => {
     installTabs(page('chrome://newtab/', 1), [page('https://app.test/', 2)])
     expect(await findUsableTab('not a url')).toBeUndefined()
+  })
+})
+
+describe('the fallback stays inside the user\'s browser', () => {
+  /** Installs a tabs fake that records create/remove calls. */
+  function installCreatable(): { created: Record<string, unknown>[]; removed: number[] } {
+    const created: Record<string, unknown>[] = []
+    const removed: number[] = []
+    vi.stubGlobal('chrome', {
+      tabs: {
+        query: async () => [],
+        create: async (info: Record<string, unknown>) => {
+          created.push(info)
+          return { id: 77, windowId: 3 }
+        },
+        remove: async (id: number) => {
+          removed.push(id)
+        },
+      },
+      // Present but must never be called: a run has no business opening a window.
+      windows: {
+        create: async () => {
+          throw new Error('a run must never open a window')
+        },
+        remove: async () => {
+          throw new Error('a run must never close a window')
+        },
+      },
+    })
+    return { created, removed }
+  }
+
+  it('opens a tab, never a window, so the profile session is inherited', async () => {
+    const { created } = installCreatable()
+    const opened = await openRunTab('https://app.test/login')
+    expect(opened).toEqual({ tabId: 77, windowId: 3 })
+    expect(created).toEqual([{ url: 'https://app.test/login', active: false }])
+  })
+
+  it('opens the tab in the background, so an unattended run does not steal focus', async () => {
+    const { created } = installCreatable()
+    await openRunTab('https://app.test/')
+    expect(created[0]?.active).toBe(false)
+  })
+
+  it('closes a tab it opened', async () => {
+    const { removed } = installCreatable()
+    await closeRunTab(77)
+    expect(removed).toEqual([77])
+  })
+
+  it('ignores a tab the user already closed', async () => {
+    vi.stubGlobal('chrome', {
+      tabs: {
+        remove: async () => {
+          throw new Error('No tab with id 77')
+        },
+      },
+    })
+    // Must not turn a already-closed tab into a run failure.
+    await expect(closeRunTab(77)).resolves.toBeUndefined()
+  })
+
+  it('does nothing when there is no tab to close', async () => {
+    const { removed } = installCreatable()
+    await closeRunTab(undefined)
+    expect(removed).toEqual([])
   })
 })

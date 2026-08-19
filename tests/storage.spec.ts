@@ -69,10 +69,6 @@ describe('settings', () => {
     expect(settings.policy.allowedSites).toEqual([])
     // The allow-list defaulting to empty is the safety property: an unconfigured
     // install can drive nothing.
-    // Running in the current tab is the default because the common case is
-    // "test the page I am looking at", and a fresh window would lose the login
-    // session the user just set up by hand.
-    expect(settings.policy.useDedicatedWindow).toBe(false)
     // Screenshots are captured on failure only; every-step capture is opt-in.
     expect(settings.policy.screenshotEveryStep).toBe(false)
     expect(settings.policy.selfHeal).toBe(false)
