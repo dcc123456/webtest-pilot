@@ -509,6 +509,70 @@ describe('refusing a run that has nowhere to go', () => {
   })
 })
 
+describe('the current page must itself be allowed', () => {
+  it('refuses before acting when the page the user is on is not allow-listed', async () => {
+    await allowSite() // allows https://app.test/*
+    const tracker = new WindowTracker()
+    const deps = {
+      ...tracker.deps(new FakeDriver()),
+      // The user is sitting on some other site entirely.
+      findTab: async () => ({
+        id: 4,
+        url: 'https://random.test/page',
+        title: 'Random',
+        active: true,
+        windowId: 1,
+      }),
+    }
+    const outcome = await mod.startRun({ testCase: testCase({ startUrl: '' }), trigger: 'manual', deps })
+    expect(outcome.run.status).toBe('error')
+    expect(outcome.run.summary).toContain('站点白名单')
+    // The fix must be copy-pasteable, not a vague "check your settings".
+    expect(outcome.run.summary).toContain('https://random.test/*')
+  })
+
+  it('names the actual page, so the user can see what it picked', async () => {
+    await allowSite()
+    const tracker = new WindowTracker()
+    const deps = {
+      ...tracker.deps(new FakeDriver()),
+      findTab: async () => ({
+        id: 4,
+        url: 'https://random.test/deep/path?q=1',
+        title: 'Random',
+        active: true,
+        windowId: 1,
+      }),
+    }
+    const outcome = await mod.startRun({ testCase: testCase({ startUrl: '' }), trigger: 'manual', deps })
+    expect(outcome.run.summary).toContain('https://random.test/deep/path?q=1')
+  })
+
+  it('does not second-guess the allow-list when a start URL is given', async () => {
+    await allowSite()
+    const tracker = new WindowTracker()
+    const driver = new FakeDriver()
+    // The current tab is off-list, but the run will navigate away from it, so the
+    // navigation's own check is the one that matters.
+    const deps = {
+      ...tracker.deps(driver),
+      findTab: async () => ({
+        id: 4,
+        url: 'https://random.test/',
+        title: 'Random',
+        active: true,
+        windowId: 1,
+      }),
+    }
+    const outcome = await mod.startRun({
+      script: script({ startUrl: 'https://app.test/login' }),
+      trigger: 'manual',
+      deps,
+    })
+    expect(outcome.run.status).toBe('passed')
+  })
+})
+
 describe('observer callbacks', () => {
   it('reports the run as soon as it is registered, so the panel can show progress', async () => {
     await allowSite()

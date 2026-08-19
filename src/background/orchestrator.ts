@@ -21,6 +21,7 @@
 import { putArtifact } from '../lib/artifacts'
 import { LlmError, streamCompletion, type WireMessage, type WireToolCall } from '../lib/llm'
 import { renderCaseForModel } from '../lib/markdown'
+import { checkUrlAllowed } from '../lib/urlmatch'
 import { describeStep } from '../lib/script'
 import {
   activeProvider,
@@ -170,7 +171,7 @@ export async function startRun(options: StartOptions): Promise<RunOutcome> {
     // the user left open — losing their work to a test they cannot see — and a
     // bridge run from CI has no "current tab" to mean anything in the first place.
     const dedicated = options.trigger === 'manual' ? policy.useDedicatedWindow : true
-    const opened = await openContext(dedicated, startUrl, deps)
+    const opened = await openContext(dedicated, startUrl, deps, policy.allowedSites)
     context = opened.context
     ownWindow = opened.ownWindow
 
@@ -228,6 +229,7 @@ async function openContext(
   useDedicatedWindow: boolean,
   startUrl: string,
   deps: OrchestratorDeps,
+  allowedSites: string[],
 ): Promise<{ context: RunContext; ownWindow?: number }> {
   if (useDedicatedWindow) {
     // Without a URL, `windows.create` lands on chrome://newtab, which no
@@ -263,7 +265,34 @@ async function openContext(
         '对话里直接说要打开哪个页面也可以）。',
     )
   }
+
+  // Check the page against the allow-list now, while we can name it and suggest a
+  // pattern. Leaving it to the first action would surface the same refusal several
+  // steps later, phrased as a mid-run failure.
+  if (!startUrl.trim()) {
+    const verdict = checkUrlAllowed(tab.url, allowedSites)
+    if (!verdict.allowed) {
+      const suggestion = suggestPattern(tab.url)
+      throw new StartError(
+        `当前页面不在站点白名单里，插件不会对它做任何操作。\n\n` +
+          `当前页面：${tab.url}\n` +
+          (suggestion
+            ? `请到「设置 → 站点白名单」加上这一行，然后重新运行：\n${suggestion}`
+            : `请到「设置 → 站点白名单」把这个站点加进去，然后重新运行。`),
+      )
+    }
+  }
   return { context: { tabId: tab.id, windowId: tab.windowId } }
+}
+
+/** A ready-to-paste allow-list pattern covering a page's own origin. */
+function suggestPattern(url: string | undefined): string | undefined {
+  if (!url) return undefined
+  try {
+    return `${new URL(url).origin}/*`
+  } catch {
+    return undefined
+  }
 }
 
 /** Replays a saved script through the deterministic runner. */

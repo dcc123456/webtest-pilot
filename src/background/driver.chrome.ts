@@ -477,25 +477,63 @@ export async function closeRunWindow(windowId: number | undefined): Promise<void
 }
 
 /**
- * Finds a tab a run can use without opening a window.
+ * Finds the tab a run should drive when not opening a window.
  *
- * Used by the "run in the current tab" mode. Returns undefined when only
- * restricted pages are open, which the caller must report rather than silently
- * opening a window the user did not ask for.
+ * This is a Chrome extension, so "the current page" is the whole point: with no
+ * start URL the run belongs on the tab the user is looking at, full stop. Ranging
+ * over other tabs would be a guess, and a wrong guess here is destructive — it
+ * would type into a page the user never pointed at, in a window they may not even
+ * be looking at.
+ *
+ * So the active tab is the only candidate unless a start URL says otherwise:
+ *
+ * 1. The active tab of the focused window — what the user means by "this page".
+ * 2. Only when a start URL is given, a tab already showing that origin, so
+ *    re-running a case does not navigate a second time.
+ *
+ * Returns undefined when the active tab is a restricted page (new tab, chrome://,
+ * the Web Store). The caller reports that with instructions, rather than silently
+ * picking some other tab or opening a window the user did not ask for.
  */
 export async function findUsableTab(preferUrl?: string): Promise<DriverTab | undefined> {
-  const all = await chrome.tabs.query({})
-  const usable = all.filter((tab) => typeof tab.id === 'number' && isAutomatableUrl(tab.url))
-  if (usable.length === 0) return undefined
-
-  if (preferUrl && preferUrl.trim()) {
-    const needle = preferUrl.trim().toLowerCase()
-    const match = usable.find((tab) => (tab.url ?? '').toLowerCase().includes(needle))
-    if (match) return toDriverTab(match)
-  }
   const [focused] = await chrome.tabs.query({ active: true, lastFocusedWindow: true })
-  if (focused && usable.some((tab) => tab.id === focused.id)) return toDriverTab(focused)
-  const active = usable.find((tab) => tab.active)
-  const chosen = active ?? usable[0]
-  return chosen ? toDriverTab(chosen) : undefined
+  const wanted = preferUrl?.trim() ?? ''
+
+  // With no URL to aim at, the active tab is the only answer. If it is a
+  // restricted page, say so — do not go hunting through the user's other windows.
+  if (!wanted) {
+    if (focused && typeof focused.id === 'number' && isAutomatableUrl(focused.url)) {
+      return toDriverTab(focused)
+    }
+    return undefined
+  }
+
+  // The run will navigate anyway, so the active tab is still the right host…
+  if (focused && typeof focused.id === 'number' && isAutomatableUrl(focused.url)) {
+    return toDriverTab(focused)
+  }
+
+  // …unless it cannot be used, in which case a tab already on the target origin
+  // is a reasonable second choice: same site, and the user did name it.
+  const targetOrigin = originOf(wanted)
+  if (targetOrigin) {
+    const all = await chrome.tabs.query({})
+    const sameOrigin = all.find(
+      (tab) =>
+        typeof tab.id === 'number' &&
+        isAutomatableUrl(tab.url) &&
+        originOf(tab.url ?? '') === targetOrigin,
+    )
+    if (sameOrigin) return toDriverTab(sameOrigin)
+  }
+  return undefined
+}
+
+/** The origin of a URL, or undefined when it is not parseable. */
+function originOf(url: string): string | undefined {
+  try {
+    return new URL(url).origin
+  } catch {
+    return undefined
+  }
 }

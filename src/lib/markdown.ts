@@ -416,7 +416,16 @@ export function renderCasesMarkdown(cases: TestCase[]): string {
 export function renderCaseForModel(testCase: TestCase): string {
   const lines: string[] = [`Test case: ${testCase.name}`]
   if (testCase.description) lines.push('', testCase.description)
-  if (testCase.startUrl) lines.push('', `Start URL: ${testCase.startUrl}`)
+  if (testCase.startUrl) {
+    lines.push('', `Start URL: ${testCase.startUrl} — already opened for you.`)
+  } else {
+    // Without this the model does not know where it is, and tends to guess a URL
+    // and call open_url — navigating away from the very page it was asked about.
+    lines.push(
+      '',
+      'No start URL: the browser is already on the page this task is about. Call snapshot to see it, and do NOT call open_url — navigating away would abandon the page the user meant.',
+    )
+  }
 
   lines.push('', 'Steps to perform, in order:')
   testCase.steps.forEach((step, index) => {
