@@ -61,6 +61,6 @@ export default defineManifest({
     },
   },
   side_panel: {
-    default_path: 'src/sidepanel/index.html',
+    default_path: 'src/panel/index.html',
   },
 })

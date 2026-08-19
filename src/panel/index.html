@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      No viewport meta: the side panel's width is set by Chrome, not by the page,
+      and a viewport declaration here would only fight it.
+
+      No CSP meta either: MV3 already forbids remote script and eval in extension
+      pages, so one written here would be redundant at best and, if it differed
+      from the manifest's, misleading.
+    -->
+    <title>WebTest Pilot 测试领航</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>
