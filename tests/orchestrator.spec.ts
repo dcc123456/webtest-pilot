@@ -86,6 +86,9 @@ async function allowSite(): Promise<void> {
 
 beforeEach(async () => {
   installChromeFake()
+  // A stubbed fetch must not survive into the next test: a leaked stub would make
+  // an unrelated failure look like a network problem.
+  vi.unstubAllGlobals()
   vi.resetModules()
   storage = await import('../src/lib/storage')
   mod = await import('../src/background/orchestrator')
@@ -383,6 +386,126 @@ describe('choosing between the current tab and a fresh window', () => {
     await mod.startRun({ script: script(), trigger: 'manual', deps: tracker.deps(new FakeDriver()) })
     expect(tracker.opened).toBe(1)
     expect(tracker.closed).toEqual([10])
+  })
+})
+
+describe('the agent opens the case start URL before the model runs', () => {
+  /**
+   * Configures a provider and stubs the network so the model loop ends at once.
+   *
+   * The navigation happens after the provider check, so it is unobservable
+   * without a provider — but the whole point is what happens *before* the model
+   * gets a turn, so the turn itself is stubbed to a single `finish`.
+   */
+  async function withStubbedModel(): Promise<void> {
+    const settings = await storage.getSettings()
+    await storage.saveSettings({
+      providers: [
+        {
+          id: 'p1',
+          label: 'Stub',
+          presetId: 'custom',
+          baseUrl: 'https://stub.test/v1',
+          model: 'stub-1',
+          apiKey: 'k',
+        },
+      ],
+      activeProviderId: 'p1',
+      policy: { ...settings.policy, allowedSites: ['https://app.test/*'] },
+    })
+    const sse = [
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"finish","arguments":"{\\"status\\":\\"passed\\",\\"summary\\":\\"done\\"}"}}]}}]}',
+      '',
+      'data: [DONE]',
+      '',
+    ].join('\n')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(sse, { headers: { 'content-type': 'text/event-stream' } })),
+    )
+  }
+
+  it('navigates to the start URL, so a run from a new tab still works', async () => {
+    await withStubbedModel()
+    const driver = new FakeDriver()
+    await mod.startRun({
+      testCase: testCase({ startUrl: 'https://app.test/login' }),
+      trigger: 'manual',
+      deps: new WindowTracker().deps(driver),
+    })
+    // The bug this prevents: the model's first tool call is refused because the
+    // tab is still chrome://newtab, reported as a tooling fault at step 0.
+    expect(driver.calls.find((call) => call.method === 'navigate')?.arg).toBe('https://app.test/login')
+  })
+
+  it('does not navigate when the case has no start URL, staying on the current page', async () => {
+    await withStubbedModel()
+    const driver = new FakeDriver()
+    await mod.startRun({
+      testCase: testCase({ startUrl: '' }),
+      trigger: 'manual',
+      deps: new WindowTracker().deps(driver),
+    })
+    expect(driver.calls.some((call) => call.method === 'navigate')).toBe(false)
+  })
+
+  it('reports an unreachable start URL as an error before spending a tool round', async () => {
+    await withStubbedModel()
+    const driver = new FakeDriver()
+    driver.navigate = async () => {
+      throw new NotAllowedError('https://evil.test/ is not in the allowed sites list.')
+    }
+    const outcome = await mod.startRun({
+      testCase: testCase({ startUrl: 'https://evil.test/' }),
+      trigger: 'manual',
+      deps: new WindowTracker().deps(driver),
+    })
+    expect(outcome.run.status).toBe('error')
+    expect(outcome.run.summary).toContain('无法打开起始地址')
+    expect(outcome.run.failure?.stepIndex).toBe(-1)
+  })
+})
+
+describe('refusing a run that has nowhere to go', () => {
+  // These end as an `error` run rather than a thrown rejection: the refusal
+  // happens after the run is registered, so the reason lands in run history where
+  // the user can actually read it, instead of vanishing into a console.
+  it('explains what to add when an unattended run has no start URL', async () => {
+    await allowSite()
+    // A dedicated window with no URL lands on chrome://newtab, which nothing can
+    // automate, so this must be refused up front rather than failing at step 0.
+    const outcome = await mod.startRun({
+      script: script({ startUrl: '' }),
+      trigger: 'schedule',
+      deps: new WindowTracker().deps(new FakeDriver()),
+    })
+    expect(outcome.run.status).toBe('error')
+    expect(outcome.run.summary).toMatch(/需要一个起始地址/)
+  })
+
+  it('tells the user to open a page when the current tab is browser-internal', async () => {
+    await allowSite()
+    const tracker = new WindowTracker()
+    const deps = { ...tracker.deps(new FakeDriver()), findTab: async () => undefined }
+    const outcome = await mod.startRun({
+      script: script({ startUrl: '' }),
+      trigger: 'manual',
+      deps,
+    })
+    expect(outcome.run.status).toBe('error')
+    expect(outcome.run.summary).toMatch(/浏览器内部页面/)
+  })
+
+  it('names the case start URL so the user knows which page to open', async () => {
+    await allowSite()
+    const tracker = new WindowTracker()
+    const deps = { ...tracker.deps(new FakeDriver()), findTab: async () => undefined }
+    const outcome = await mod.startRun({
+      script: script({ startUrl: 'https://app.test/checkout' }),
+      trigger: 'manual',
+      deps,
+    })
+    expect(outcome.run.summary).toContain('https://app.test/checkout')
   })
 })
 

@@ -215,10 +215,14 @@ async function resolveScript(options: StartOptions): Promise<TestScript | undefi
 /**
  * Establishes the tab a run drives.
  *
- * A dedicated window is the default: it keeps the run away from the user's own
- * tabs, and `focused: false` means a 3am run does not steal the screen. Reusing
- * the current tab is offered because it is what a developer debugging a selector
- * actually wants.
+ * Reusing the current tab is the default, because "test the page I am looking at"
+ * is the common case and it keeps the session the user set up by hand. Unattended
+ * triggers get their own window instead, with `focused: false` so a 3am run does
+ * not steal the screen.
+ *
+ * Either way this refuses to hand back a tab the run cannot act on. Returning one
+ * would produce a failure at step 0 phrased as a tooling fault, which tells the
+ * user nothing about the actual problem: they are sitting on a new-tab page.
  */
 async function openContext(
   useDedicatedWindow: boolean,
@@ -226,13 +230,37 @@ async function openContext(
   deps: OrchestratorDeps,
 ): Promise<{ context: RunContext; ownWindow?: number }> {
   if (useDedicatedWindow) {
-    const opened = await deps.openWindow(startUrl || undefined)
+    // Without a URL, `windows.create` lands on chrome://newtab, which no
+    // extension may script. A run with nowhere to go must say so up front.
+    if (!startUrl.trim()) {
+      throw new StartError(
+        '这次运行需要一个起始地址，但用例里没有写。\n\n' +
+          '定时任务和本地接口触发的运行会新开一个窗口，新窗口停在浏览器新标签页上，' +
+          '而扩展无法操作新标签页。\n\n' +
+          '请在用例里补上地址，例如 Markdown 用例加一行 `- url: https://your-site.com/login`，' +
+          '或在对话里直接说明要打开哪个页面。',
+      )
+    }
+    const opened = await deps.openWindow(startUrl)
     return { context: { tabId: opened.tabId, windowId: opened.windowId }, ownWindow: opened.windowId }
   }
   const tab = await deps.findTab(startUrl)
   if (!tab) {
+    // A start URL rescues this case: the run can navigate the current tab there,
+    // even from a new-tab page. Opening a window would contradict the user's
+    // "run in the current tab" setting, so ask rather than decide for them.
+    if (startUrl.trim()) {
+      throw new StartError(
+        `当前标签页是浏览器内部页面（如新标签页、chrome:// 页面、扩展页），扩展无法在上面操作。\n\n` +
+          `这个用例的起始地址是 ${startUrl.trim()}。请先在当前标签页手动打开它（或任意一个普通网页），再重新运行；\n` +
+          `也可以在「设置 → 手动运行时打开独立窗口」里改成新开窗口，那样插件会自己导航过去。`,
+      )
+    }
     throw new StartError(
-      '找不到可用的标签页。当前所有标签页都是浏览器内部页面（chrome://、扩展页、应用商店），插件无法在这些页面上操作。请打开一个普通网页，或在设置中改用「独立窗口」模式。',
+      '当前标签页是浏览器内部页面（如新标签页、chrome:// 页面、扩展页），扩展无法在上面操作。\n\n' +
+        '请先打开你要测试的网页，再回到侧边栏运行；\n' +
+        '或者在用例里写明起始地址（Markdown 用例加一行 `- url: https://your-site.com/`，' +
+        '对话里直接说要打开哪个页面也可以）。',
     )
   }
   return { context: { tabId: tab.id, windowId: tab.windowId } }
@@ -353,6 +381,49 @@ async function driveWithModel(
   const artifactIds: string[] = []
   const assertionsPassed: string[] = []
   const extracted: Record<string, unknown> = {}
+
+  // Navigate to the case's start URL before the model gets a turn.
+  //
+  // The script runner has always done this; the agent did not, and that was the
+  // bug behind "stopped at step 0: chrome://newtab/ cannot be automated". The
+  // model would open on whatever page happened to be there — a new-tab page when
+  // the user ran from a fresh tab — and its first tool call would be refused by
+  // the allow-list, reported as a tooling fault that named neither the cause nor
+  // the fix. Doing it here rather than asking the model to call `open_url` also
+  // saves a tool round and removes a step it could forget.
+  const startUrl = testCase.startUrl?.trim() ?? ''
+  if (startUrl) {
+    const startedAt = Date.now()
+    options.observer?.onStatus?.(run.id, 'running', `打开 ${startUrl}`)
+    try {
+      await driver.navigate(context, startUrl)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      const record: StepRecord = {
+        index: -1,
+        action: 'open_url',
+        description: `open ${startUrl}`,
+        ok: false,
+        startedAt,
+        durationMs: Date.now() - startedAt,
+        error: message,
+      }
+      steps.push(record)
+      const finished: TestRun = {
+        ...run,
+        status: 'error',
+        finishedAt: Date.now(),
+        heartbeatAt: Date.now(),
+        steps,
+        summary: `无法打开起始地址：${message}`,
+        failure: { stepIndex: -1, message },
+      }
+      await saveRun(finished)
+      await logOutcome(finished)
+      options.observer?.onRun?.(finished)
+      return { run: finished }
+    }
+  }
 
   const maxRounds = settings.policy.maxToolRounds
   const messages: WireMessage[] = initialMessages(
