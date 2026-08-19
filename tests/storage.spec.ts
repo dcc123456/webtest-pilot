@@ -2,7 +2,7 @@
  * Storage tests.
  *
  * The invariants here are the ones that only break under concurrency or at a
- * limit â€?a lost write when an alarm fires mid-save, run history growing past the
+ * limit â€” a lost write when an alarm fires mid-save, run history growing past the
  * quota, a secret leaking into an export. Those are cheap to test now and very
  * expensive to diagnose in the field.
  */
