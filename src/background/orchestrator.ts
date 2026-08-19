@@ -165,7 +165,12 @@ export async function startRun(options: StartOptions): Promise<RunOutcome> {
   const deps = options.deps ?? chromeDeps
 
   try {
-    const opened = await openContext(policy.useDedicatedWindow, startUrl, deps)
+    // A manual run targets the tab the user is looking at; an unattended one must
+    // not. A schedule firing at 3am would otherwise navigate away from whatever
+    // the user left open — losing their work to a test they cannot see — and a
+    // bridge run from CI has no "current tab" to mean anything in the first place.
+    const dedicated = options.trigger === 'manual' ? policy.useDedicatedWindow : true
+    const opened = await openContext(dedicated, startUrl, deps)
     context = opened.context
     ownWindow = opened.ownWindow
 

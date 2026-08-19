@@ -331,6 +331,11 @@ export function toolSchemas(options: { selfHeal: boolean; secretNames: string[] 
           properties: {
             ref: { type: 'string', description: 'Optional element to crop to.' },
             note: { type: 'string', description: 'Why this shot matters.' },
+            keep: {
+              type: 'boolean',
+              description:
+                'True to make this screenshot a step of the saved script, so every future replay captures it at this point. Default false: the shot still appears in this run report, but does not become part of the test.',
+            },
           },
         },
       },
@@ -428,6 +433,11 @@ export function systemPrompt(options: {
     '- Every expectation in the test case must be checked with the assert tool. Reading the page and judging that it looks correct is not a check.',
     '- If an expectation does not hold, call finish with status "failed" and say what you observed. Finding a real bug is a success for you, not a failure.',
     '- If you cannot complete a step at all — an element is missing, a control is disabled, the site refuses — report failed and explain. Do not invent a way around it.',
+    '',
+    'Screenshots:',
+    '- A failing step is captured automatically. Do not take a screenshot just to look at the page — snapshot is cheaper and tells you more.',
+    '- Call screenshot when a human reviewing the report would need to see the pixels: a rendering bug, a chart, a visual state no assertion can express.',
+    '- Set keep: true only when the shot belongs in the saved script, so every future replay captures it at that same point. Leave it out for a one-off diagnostic.',
     '',
     'Limits you cannot cross:',
     `- You may only touch these sites: ${
@@ -866,17 +876,23 @@ export async function dispatchTool(
         }
         const shot = await deps.driver.screenshot(deps.context, crop)
         const note = stringArg(args.note)
+        // Only a shot the model marks `keep` becomes a script step. Recording every
+        // diagnostic screenshot would make each replay slower and the artifact
+        // budget fill with frames nobody asked for.
+        const keep = boolArg(args.keep)
         return {
           content: `Captured a ${shot.width}×${shot.height} screenshot${
             resolved ? ` of ${resolved.label}` : ' of the visible area'
-          }. It is attached to the run report${note ? ` with the note: ${note}` : ''}.`,
+          }. It is attached to the run report${note ? ` with the note: ${note}` : ''}${
+            keep ? ' and will be captured again on every replay' : ''
+          }.`,
           screenshotDataUrl: shot.dataUrl,
           recorded: {
             action: 'screenshot',
             ...(resolved ? { target: resolved.target } : {}),
             ...(note ? { note } : {}),
             ok: true,
-            keep: true,
+            keep,
           },
         }
       }
@@ -985,6 +1001,22 @@ function stringArg(value: unknown): string | undefined {
 function numberArg(value: unknown, fallback: number): number {
   const parsed = typeof value === 'number' ? value : Number(value)
   return Number.isFinite(parsed) ? parsed : fallback
+}
+
+/**
+ * Reads a boolean tool argument.
+ *
+ * The string forms are not defensive padding: models routinely emit `"true"` in
+ * JSON arguments, and treating that as falsy would silently drop the flag the
+ * model meant to set.
+ */
+function boolArg(value: unknown): boolean {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'string') {
+    const text = value.trim().toLowerCase()
+    return text === 'true' || text === 'yes' || text === '1'
+  }
+  return value === 1
 }
 
 /**

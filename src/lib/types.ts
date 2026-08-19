@@ -312,7 +312,15 @@ export interface RunPolicy {
    * is empty.
    */
   allowedSites: string[]
-  /** Open a dedicated window for each run instead of using the current tab. */
+  /**
+   * Open a dedicated window for each run instead of using the current tab.
+   *
+   * Off by default: the common case is "test the page I am looking at". A run
+   * that opened its own window would start on a blank page and lose the login
+   * session, cookies and app state the user just set up by hand — so the
+   * cheapest thing to test becomes the hardest. Unattended triggers still need
+   * a window, and turn it on themselves.
+   */
   useDedicatedWindow: boolean
   /** Total wall-clock budget for one run. */
   runTimeoutMs: number
@@ -347,13 +355,19 @@ export interface Settings {
  *
  * `selfHeal` is off for the same class of reason — a run that silently repairs
  * its own selectors can report a pass for a page that no longer matches the test.
+ *
+ * `useDedicatedWindow` is off so a manual run tests the tab the user is already
+ * on, keeping their logged-in session. `screenshotEveryStep` is off because a
+ * screenshot on failure is the evidence that matters; capturing every step costs
+ * a `captureVisibleTab` round trip per step and fills the artifact budget with
+ * frames nobody opens.
  */
 export const DEFAULT_SETTINGS: Settings = {
   providers: [],
   activeProviderId: '',
   policy: {
     allowedSites: [],
-    useDedicatedWindow: true,
+    useDedicatedWindow: false,
     runTimeoutMs: 300_000,
     stepTimeoutMs: 10_000,
     maxToolRounds: 24,

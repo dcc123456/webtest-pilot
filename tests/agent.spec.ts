@@ -481,7 +481,37 @@ describe('dispatchTool: extraction and screenshots', () => {
     )
     expect(outcome.screenshotDataUrl).toContain('data:image/png')
     expect(outcome.content).toContain('after submit')
+    // A diagnostic shot by default: it reaches the report but must not become a
+    // step, or every replay would carry screenshots nobody asked for.
+    expect(outcome.recorded).toMatchObject({ action: 'screenshot', keep: false })
+  })
+
+  it('keeps a screenshot as a script step when the model asks for it', async () => {
+    const outcome = await dispatchTool(
+      call('screenshot', { note: 'the rendered invoice', keep: true }),
+      deps(new FakeDriver(), withRefs()),
+    )
     expect(outcome.recorded).toMatchObject({ action: 'screenshot', keep: true })
+    expect(outcome.content).toContain('every replay')
+  })
+
+  it('accepts the string "true", which models emit routinely', async () => {
+    const outcome = await dispatchTool(
+      call('screenshot', { keep: 'true' }),
+      deps(new FakeDriver(), withRefs()),
+    )
+    // Treating "true" as falsy would silently drop the flag the model set.
+    expect(outcome.recorded).toMatchObject({ keep: true })
+  })
+
+  it('treats an absent or nonsense keep as a diagnostic', async () => {
+    for (const value of [undefined, 'no', 'false', 0, null]) {
+      const outcome = await dispatchTool(
+        call('screenshot', value === undefined ? {} : { keep: value }),
+        deps(new FakeDriver(), withRefs()),
+      )
+      expect(outcome.recorded).toMatchObject({ keep: false })
+    }
   })
 })
 
