@@ -269,9 +269,22 @@ export async function runScript(
         }
         if (record.screenshotId) failure.screenshotId = record.screenshotId
         return {
-          // An assertion that ran and did not hold is a test failure; anything
-          // else at this point is the harness failing to carry out the step.
-          status: outcome.kind === 'assertion' ? 'failed' : 'error',
+          // Fault attribution, and the distinction the whole product rests on:
+          //
+          // - `failed` — the application was not in the state the script needs.
+          //   A missing element and a disabled button are both findings: the tool
+          //   did its job and told us the app is wrong.
+          // - `error` — the harness could not carry the step out at all (the tab
+          //   died, injection was blocked, a secret is missing). Nothing was
+          //   learned about the application, so reporting this as a test failure
+          //   would send someone hunting for a bug that does not exist.
+          // - `cancelled` — a human stopped it, which is not a fault at all.
+          status:
+            outcome.kind === 'cancelled'
+              ? 'cancelled'
+              : outcome.kind === 'harness'
+                ? 'error'
+                : 'failed',
           steps,
           failure,
           extracted,
@@ -308,8 +321,13 @@ export async function runScript(
 /** What one step attempt produced. */
 interface StepOutcome {
   ok: boolean
-  /** Which layer decided the outcome, so the runner can classify it. */
-  kind: 'action' | 'assertion' | 'harness'
+  /**
+   * Which layer decided the outcome, so the runner can attribute the fault.
+   *
+   * `action` and `assertion` are both findings about the application; `harness`
+   * means the tool itself could not proceed; `cancelled` is a human decision.
+   */
+  kind: 'action' | 'assertion' | 'harness' | 'cancelled'
   attempts: number
   error?: string
   usedFallback?: boolean
@@ -402,7 +420,7 @@ async function executeStep(
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     attempts = attempt
     if (deps.signal?.aborted) {
-      return { ok: false, kind: 'harness', attempts, error: 'Cancelled.' }
+      return { ok: false, kind: 'cancelled', attempts, error: 'Cancelled.' }
     }
 
     const result = await driver.exec(context, op)

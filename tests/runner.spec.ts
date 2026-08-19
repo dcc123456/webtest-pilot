@@ -106,7 +106,9 @@ describe('runScript: failure classification', () => {
       driver,
       context: context(),
     })
-    expect(result.status).toBe('error')
+    // A findable-but-unusable control is a statement about the application, not
+    // about the tool: the click was attempted and the app refused it.
+    expect(result.status).toBe('failed')
     expect(result.failure?.message).toContain('disabled')
   })
 

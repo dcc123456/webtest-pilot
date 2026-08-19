@@ -75,6 +75,30 @@ export interface StartOptions {
   useAgent?: boolean
   observer?: RunObserver
   signal?: AbortSignal
+  /**
+   * Overrides for the browser-facing pieces.
+   *
+   * Present so the lifecycle guarantees this module exists to enforce — the run
+   * window is always closed, a failure is still persisted, cancellation is
+   * honoured — can be tested without a real Chrome. Production callers omit it.
+   */
+  deps?: OrchestratorDeps
+}
+
+/** The browser-facing collaborators, injectable for tests. */
+export interface OrchestratorDeps {
+  createDriver: (allowedSites: string[]) => Driver
+  openWindow: typeof openRunWindow
+  closeWindow: typeof closeRunWindow
+  findTab: typeof findUsableTab
+}
+
+/** The real implementations, used unless a caller injects otherwise. */
+const chromeDeps: OrchestratorDeps = {
+  createDriver: (allowedSites) => new ChromeDriver(allowedSites),
+  openWindow: openRunWindow,
+  closeWindow: closeRunWindow,
+  findTab: findUsableTab,
 }
 
 /** Outcome handed back to the trigger that started the run. */
@@ -138,13 +162,14 @@ export async function startRun(options: StartOptions): Promise<RunOutcome> {
 
   let context: RunContext | undefined
   let ownWindow: number | undefined
+  const deps = options.deps ?? chromeDeps
 
   try {
-    const opened = await openContext(policy.useDedicatedWindow, startUrl)
+    const opened = await openContext(policy.useDedicatedWindow, startUrl, deps)
     context = opened.context
     ownWindow = opened.ownWindow
 
-    const driver = new ChromeDriver(policy.allowedSites)
+    const driver = deps.createDriver(policy.allowedSites)
     const outcome = useScript
       ? await replayScript(script as TestScript, run, driver, context, options)
       : await driveWithModel(options.testCase as TestCase, run, driver, context, options)
@@ -172,7 +197,7 @@ export async function startRun(options: StartOptions): Promise<RunOutcome> {
   } finally {
     // A leaked window per scheduled run would fill the desktop overnight, so
     // this runs even when the run threw.
-    await closeRunWindow(ownWindow)
+    await deps.closeWindow(ownWindow)
   }
 }
 
@@ -193,12 +218,13 @@ async function resolveScript(options: StartOptions): Promise<TestScript | undefi
 async function openContext(
   useDedicatedWindow: boolean,
   startUrl: string,
+  deps: OrchestratorDeps,
 ): Promise<{ context: RunContext; ownWindow?: number }> {
   if (useDedicatedWindow) {
-    const opened = await openRunWindow(startUrl || undefined)
+    const opened = await deps.openWindow(startUrl || undefined)
     return { context: { tabId: opened.tabId, windowId: opened.windowId }, ownWindow: opened.windowId }
   }
-  const tab = await findUsableTab(startUrl)
+  const tab = await deps.findTab(startUrl)
   if (!tab) {
     throw new StartError(
       '找不到可用的标签页。当前所有标签页都是浏览器内部页面（chrome://、扩展页、应用商店），插件无法在这些页面上操作。请打开一个普通网页，或在设置中改用「独立窗口」模式。',
@@ -266,9 +292,28 @@ async function replayScript(
     ...(result.failure ? { failure: result.failure } : {}),
   }
   await saveRun(finished)
+  await logOutcome(finished)
   options.observer?.onRun?.(finished)
   options.observer?.onStatus?.(run.id, result.status, result.summary)
   return { run: finished }
+}
+
+/**
+ * Writes a log line for a run that did not pass.
+ *
+ * The run record already holds the detail, but the log is what a user actually
+ * reads after an unattended failure — and it is the only place that survives the
+ * run history being capped or cleared.
+ */
+async function logOutcome(run: TestRun): Promise<void> {
+  if (run.status === 'passed') return
+  await appendLog({
+    // `error` and `interrupted` mean the suite did not really run, which needs
+    // attention more urgently than a genuine test failure.
+    level: run.status === 'failed' || run.status === 'cancelled' ? 'warn' : 'error',
+    source: `run:${run.id}`,
+    message: `运行「${run.caseName}」结束，状态：${run.status}。${run.failure?.message ?? run.summary ?? ''}`,
+  })
 }
 
 /**
@@ -519,6 +564,7 @@ async function driveWithModel(
     ...(Object.keys(extracted).length > 0 ? { extracted } : {}),
   }
   await saveRun(finished)
+  await logOutcome(finished)
   options.observer?.onRun?.(finished)
   options.observer?.onStatus?.(run.id, status, summary)
 
