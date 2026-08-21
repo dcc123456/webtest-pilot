@@ -94,7 +94,7 @@ function baseOptions(overrides: Partial<Parameters<typeof converse>[2]> = {}): P
     context: CONTEXT,
     provider: { apiKey: 'k', baseUrl: 'https://api.test', model: 'm' },
     catalogue: [],
-    confirmMode: 'auto',
+    getConfirmMode: () => 'auto',
     secretNames: [],
     secretValues: new Map(),
     selfHeal: false,
@@ -149,7 +149,7 @@ describe('converse confirmation gating', () => {
     let pendingResolve: ((approved: boolean) => void) | undefined
     const options = baseOptions({
       driver,
-      confirmMode: 'write',
+      getConfirmMode: () => 'write',
       stream: scriptedModel([
         { toolCalls: [toolCall('s1', 'snapshot', {})] },
         { toolCalls: [toolCall('f1', 'fill', { ref: 'e1', value: 'hello' })] },
@@ -174,7 +174,7 @@ describe('converse confirmation gating', () => {
     let pendingResolve: ((approved: boolean) => void) | undefined
     const options = baseOptions({
       driver,
-      confirmMode: 'always',
+      getConfirmMode: () => 'always',
       stream: scriptedModel([
         { toolCalls: [toolCall('c1', 'click', { ref: 'e1' })] },
         { content: "OK, I won't click." },
@@ -200,7 +200,7 @@ describe('converse confirmation gating', () => {
     let pendingSeen = false
     const options = baseOptions({
       driver,
-      confirmMode: 'auto',
+      getConfirmMode: () => 'auto',
       stream: scriptedModel([{ content: 'Nothing to do.' }]),
       onPending: () => {
         pendingSeen = true
@@ -208,6 +208,41 @@ describe('converse confirmation gating', () => {
     })
     await converse([], 'hi', options)
     expect(pendingSeen).toBe(false)
+  })
+
+  it('picks up a mode change made mid-turn for the next action', async () => {
+    const driver = new FakeDriver()
+    driver.snapshotToReturn = snapshotWith('e1', 'button', 'Go', 'button', {
+      how: 'text',
+      value: 'Go',
+    })
+    let mode: 'auto' | 'write' | 'always' = 'auto'
+    let pendingResolve: ((approved: boolean) => void) | undefined
+    const options = baseOptions({
+      driver,
+      getConfirmMode: () => mode,
+      stream: scriptedModel([
+        // First action is a read; while it runs, the user tightens the mode.
+        { toolCalls: [toolCall('s1', 'snapshot', {})] },
+        // This click must now prompt because the mode changed to 'write'.
+        { toolCalls: [toolCall('c1', 'click', { ref: 'e1' })] },
+        { content: 'done' },
+      ]),
+      onPending: (action) => {
+        pendingResolve = action.decide
+        expect(action.name).toBe('click')
+      },
+      onStatus: () => {
+        // Flip the mode as soon as the turn reports progress, before the click.
+        mode = 'write'
+      },
+    })
+    const promise = converse([], 'go', options)
+    await waitFor(() => expect(pendingResolve).toBeDefined())
+    pendingResolve?.(true)
+    const result = await promise
+    expect(driver.countOf('click')).toBe(1)
+    expect(result.steps).toHaveLength(1)
   })
 })
 

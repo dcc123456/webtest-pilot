@@ -804,6 +804,14 @@ async function handlePanelRequest(request: PanelRequest): Promise<PanelResponse>
       return { ok: true, conversation: transcript }
     }
 
+    case 'setConversationConfirmMode': {
+      // Update the live value immediately. An in-flight turn reads it through a
+      // getter for each tool call, so this takes effect on the next action
+      // without waiting for the next user message.
+      conversation.confirmMode = request.mode
+      return { ok: true }
+    }
+
     case 'listSkills': {
       return { ok: true, message: JSON.stringify(await getSkills()) }
     }
@@ -884,7 +892,7 @@ async function runConversation(params: {
   secretValues: Map<string, string>
   secretNames: string[]
 }): Promise<void> {
-  const { context, ownTab, controller, provider, settings, activeSkill, catalogue, confirmMode } =
+  const { context, ownTab, controller, provider, settings, activeSkill, catalogue } =
     params
   const driver = chromeDeps.createDriver(settings.policy.allowedSites)
   let assistantText = ''
@@ -914,7 +922,7 @@ async function runConversation(params: {
       },
       activeSkill: activeSkill ?? undefined,
       catalogue,
-      confirmMode,
+      getConfirmMode: () => conversation.confirmMode,
       secretNames: params.secretNames,
       secretValues: params.secretValues,
       selfHeal: settings.policy.selfHeal,

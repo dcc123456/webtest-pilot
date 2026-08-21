@@ -65,7 +65,14 @@ export interface ConverseOptions {
   activeSkill?: Skill
   /** Other auto-matchable skills, advertised as a catalogue. */
   catalogue: Skill[]
-  confirmMode: ConfirmMode
+  /**
+   * Returns the confirmation mode to apply to the *next* tool call.
+   *
+   * A getter rather than a fixed value so the user can change the mode mid-turn
+   * (from the panel's dropdown) and have the very next action use it, instead of
+   * the whole turn being frozen to whatever was selected when it started.
+   */
+  getConfirmMode: () => ConfirmMode
   secretNames: string[]
   /** Map of secret name -> value, substituted at the last moment before fill. */
   secretValues: Map<string, string>
@@ -298,8 +305,11 @@ export async function converse(
       }
 
       const mutating = MUTATING_TOOLS.has(name)
+      // Read live so a mode change made while the model is between actions
+      // applies to the next one immediately.
+      const confirmMode = options.getConfirmMode()
       const needsConsent =
-        options.confirmMode === 'always' || (options.confirmMode === 'write' && mutating)
+        confirmMode === 'always' || (confirmMode === 'write' && mutating)
 
       let approved = true
       if (needsConsent && options.onPending) {

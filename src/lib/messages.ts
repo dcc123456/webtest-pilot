@@ -79,6 +79,7 @@ export type PanelRequest =
   | { type: 'getStorageUsage' }
   // --- Open-ended conversation -------------------------------------------
   | { type: 'converse'; message: string; skillId?: string | null; confirmMode?: ConfirmMode }
+  | { type: 'setConversationConfirmMode'; mode: ConfirmMode }
   | { type: 'getConversation' }
   | { type: 'cancelConversation' }
   | { type: 'approveAction'; pendingId: string; approved: boolean }

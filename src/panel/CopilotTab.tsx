@@ -482,7 +482,13 @@ export function CopilotTab({ worker }: { worker: WorkerApi }) {
             >
               <select
                 value={confirmMode}
-                onChange={(event) => setConfirmMode(event.target.value as ConfirmMode)}
+                onChange={(event) => {
+                  const next = event.target.value as ConfirmMode
+                  setConfirmMode(next)
+                  // Push immediately so an in-flight turn reads the new mode for
+                  // its next action, not just the following user message.
+                  void call({ type: 'setConversationConfirmMode', mode: next })
+                }}
                 aria-label='确认模式'
               >
                 {CONFIRM_MODES.map((mode) => (
