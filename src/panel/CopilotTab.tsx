@@ -62,9 +62,21 @@ let entryCounter = 0
 const nextId = (): string => `c${(entryCounter += 1)}`
 
 const CONFIRM_MODES: { value: ConfirmMode; label: string; hint: string }[] = [
-  { value: 'auto', label: '自动', hint: '模型直接操作，不询问' },
-  { value: 'write', label: '写操作确认', hint: '点击/填写等改动页面时确认' },
-  { value: 'always', label: '全部确认', hint: '每次工具调用都确认' },
+  {
+    value: 'auto',
+    label: '全自动',
+    hint: '模型直接读取并操作页面，不弹确认。适合只读分析或你完全信任的重复操作。',
+  },
+  {
+    value: 'write',
+    label: '改页面时确认',
+    hint: '点击、填写、选择、勾选、按键等会改动页面的动作，执行前先问你；读取和滚动不打扰。',
+  },
+  {
+    value: 'always',
+    label: '每一步都确认',
+    hint: '包括读取、滚动在内的每次工具调用都先征得你同意，最稳妥。',
+  },
 ]
 
 export function CopilotTab({ worker }: { worker: WorkerApi }) {
@@ -437,35 +449,38 @@ export function CopilotTab({ worker }: { worker: WorkerApi }) {
             </select>
           ) : null}
           <span className='spacer' />
-          <div className='confirm-toggle' role='group' aria-label='确认模式'>
-            {CONFIRM_MODES.map((mode) => (
-              <button
-                key={mode.value}
-                type='button'
-                className={confirmMode === mode.value ? 'is-active' : ''}
-                title={mode.hint}
-                onClick={() => setConfirmMode(mode.value)}
-              >
-                {mode.label}
-              </button>
-            ))}
-          </div>
+          <label className='confirm-select' title={CONFIRM_MODES.find((m) => m.value === confirmMode)?.hint}>
+            <span className='faint small'>确认</span>
+            <select
+              value={confirmMode}
+              onChange={(event) => setConfirmMode(event.target.value as ConfirmMode)}
+            >
+              {CONFIRM_MODES.map((mode) => (
+                <option key={mode.value} value={mode.value} title={mode.hint}>
+                  {mode.label}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
 
         {pendingId ? (
           <div className='row'>
             <span className='faint small'>等待你确认上方的操作…</span>
           </div>
-        ) : null}
+        ) : (
+          <span className='confirm-hint faint small'>
+            {CONFIRM_MODES.find((mode) => mode.value === confirmMode)?.hint}
+          </span>
+        )}
 
         <textarea
-          className='textarea'
           rows={3}
-          placeholder='说点什么，或描述你想让助手对这个页面做什么…'
+          placeholder='说点什么，或描述你想让助手对这个页面做什么…（Enter 发送，Shift+Enter 换行）'
           value={draft}
           onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
-            if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+            if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault()
               send()
             }

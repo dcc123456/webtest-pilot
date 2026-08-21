@@ -173,9 +173,9 @@ a {
 }
 
 .app__tab {
-  flex: 1 1 0;
+  flex: 0 1 auto;
   min-width: 0;
-  padding: 7px 2px 6px;
+  padding: 7px 12px 6px;
   background: none;
   border: none;
   border-bottom: 2px solid transparent;
@@ -204,17 +204,92 @@ a {
   font-weight: 400;
 }
 
+/* "更多" overflow menu: keeps the narrow tab bar to four primary tabs. */
+.app__more {
+  position: relative;
+  margin-left: auto;
+}
+
+.app__tab--more {
+  flex: 0 0 auto;
+  padding: 7px 10px 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.app__tab--more.is-active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+.app__more-caret {
+  font-size: 9px;
+}
+
+.app__more-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 20;
+  min-width: 130px;
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+  gap: 2px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 0 0 8px 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+
+.app__more-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+  font: inherit;
+}
+
+.app__more-item:hover {
+  background: var(--bg-hover);
+}
+
+.app__more-item.is-selected {
+  color: var(--accent);
+  font-weight: 600;
+}
+
 .app__body {
   flex: 1 1 auto;
   min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .app__pane {
+  flex: 1 1 auto;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  min-height: 100%;
+  overflow-y: auto;
+}
+
+/* Panes that manage their own internal scroll (the two chat-style tabs) fill
+   the height exactly and pin their composer to the bottom instead of growing the
+   pane and scrolling the whole thing. */
+.app__pane--fill {
+  overflow: hidden;
 }
 
 /* --- Generic bits --------------------------------------------------------- */
@@ -807,6 +882,26 @@ textarea.mono {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  flex: 0 0 auto;
+}
+
+.chat__compose textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 54px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  line-height: 1.4;
+  box-sizing: border-box;
+}
+
+.chat__compose textarea:focus-visible {
+  outline: none;
+  border-color: var(--accent);
 }
 
 /*
@@ -1193,6 +1288,24 @@ textarea.mono {
   background: var(--bg);
 }
 
+/* Confirm-mode dropdown + live description in the composer. */
+.confirm-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.confirm-select select {
+  padding: 2px 6px;
+  font-size: 12px;
+}
+
+.confirm-hint {
+  display: block;
+  line-height: 1.35;
+  padding: 0 2px;
+}
+
 /* A tool call that is waiting for the user to approve or decline. */
 .confirm-card {
   align-self: center;
@@ -1215,29 +1328,6 @@ textarea.mono {
   font-weight: 600;
 }
 
-/* Segmented control for the per-conversation confirmation mode. */
-.confirm-toggle {
-  display: inline-flex;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  overflow: hidden;
-}
-
-.confirm-toggle button {
-  appearance: none;
-  border: 0;
-  background: transparent;
-  padding: 3px 9px;
-  font-size: 12px;
-  cursor: pointer;
-  color: var(--fg-muted);
-}
-
-.confirm-toggle button.is-active {
-  background: var(--accent);
-  color: var(--accent-text);
-}
-
 .chip-clear {
   appearance: none;
   border: 0;
@@ -1247,17 +1337,5 @@ textarea.mono {
   font-size: 14px;
   line-height: 1;
   padding: 0 0 0 4px;
-}
-
-.msg__caret {
-  display: inline-block;
-  width: 2px;
-  animation: blink 1s steps(2, start) infinite;
-}
-
-@keyframes blink {
-  to {
-    visibility: hidden;
-  }
 }
 

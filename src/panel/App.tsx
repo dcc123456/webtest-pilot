@@ -22,7 +22,7 @@
  * @module panel/App
  */
 
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { CancelButton } from './CancelButton'
 import { CasesTab } from './CasesTab'
 import { ChatTab } from './ChatTab'
@@ -34,14 +34,20 @@ import { SettingsTab } from './SettingsTab'
 import { Badge, Button, Notice, ToastProvider } from './components'
 import { useWorker } from './useWorker'
 
-type TabKey = 'copilot' | 'chat' | 'cases' | 'scripts' | 'runs' | 'schedules' | 'settings'
+type PrimaryTabKey = 'copilot' | 'chat' | 'cases' | 'runs'
+type OverflowTabKey = 'scripts' | 'schedules' | 'settings'
+type TabKey = PrimaryTabKey | OverflowTabKey
 
-const TABS: { key: TabKey; label: string }[] = [
+const PRIMARY_TABS: { key: PrimaryTabKey; label: string }[] = [
   { key: 'copilot', label: '对话' },
   { key: 'chat', label: '用例编写' },
   { key: 'cases', label: '用例' },
-  { key: 'scripts', label: '脚本' },
   { key: 'runs', label: '运行' },
+]
+
+/** Tabs tucked behind "更多" to keep the bar uncluttered in a narrow side panel. */
+const OVERFLOW_TABS: { key: OverflowTabKey; label: string }[] = [
+  { key: 'scripts', label: '脚本' },
   { key: 'schedules', label: '定时' },
   { key: 'settings', label: '设置' },
 ]
@@ -60,6 +66,26 @@ function Shell() {
   const [focusCaseId, setFocusCaseId] = useState<string | null>(null)
   const [focusRunId, setFocusRunId] = useState<string | null>(null)
   const [highlightSites, setHighlightSites] = useState(false)
+  const [moreOpen, setMoreOpen] = useState(false)
+  const moreRef = useRef<HTMLDivElement | null>(null)
+
+  // Close the "更多" menu on an outside click or Escape, so it behaves like a
+  // native menu rather than a toggle that stays open until re-clicked.
+  useEffect(() => {
+    if (!moreOpen) return
+    const onPointer = (event: MouseEvent) => {
+      if (moreRef.current && !moreRef.current.contains(event.target as Node)) setMoreOpen(false)
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMoreOpen(false)
+    }
+    document.addEventListener('mousedown', onPointer)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onPointer)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [moreOpen])
 
   const openCase = useCallback((caseId: string) => {
     setFocusCaseId(caseId)
@@ -88,6 +114,9 @@ function Shell() {
     schedules: state.schedules.filter((entry) => entry.enabled).length,
     settings: 0,
   }
+
+  const activeOverflow = OVERFLOW_TABS.find((entry) => entry.key === tab)
+  const moreCount = OVERFLOW_TABS.reduce((sum, entry) => sum + counts[entry.key], 0)
 
   return (
     <div className='app'>
@@ -128,7 +157,7 @@ function Shell() {
       </div>
 
       <div className='app__tabs' role='tablist'>
-        {TABS.map((entry) => (
+        {PRIMARY_TABS.map((entry) => (
           <button
             key={entry.key}
             className='app__tab'
@@ -142,6 +171,43 @@ function Shell() {
             ) : null}
           </button>
         ))}
+
+        <div className='app__more' ref={moreRef}>
+          <button
+            className={
+              'app__tab app__tab--more' + (activeOverflow || moreOpen ? ' is-active' : '')
+            }
+            aria-haspopup='menu'
+            aria-expanded={moreOpen}
+            onClick={() => setMoreOpen((current) => !current)}
+          >
+            更多
+            {moreCount > 0 ? <span className='app__tab-count'>{moreCount}</span> : null}
+            <span className='app__more-caret' aria-hidden='true'>
+              ▾
+            </span>
+          </button>
+          {moreOpen ? (
+            <div className='app__more-menu' role='menu'>
+              {OVERFLOW_TABS.map((entry) => (
+                <button
+                  key={entry.key}
+                  className={'app__more-item' + (tab === entry.key ? ' is-selected' : '')}
+                  role='menuitem'
+                  onClick={() => {
+                    setTab(entry.key)
+                    setMoreOpen(false)
+                  }}
+                >
+                  <span>{entry.label}</span>
+                  {counts[entry.key] > 0 ? (
+                    <span className='app__tab-count'>{counts[entry.key]}</span>
+                  ) : null}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
       </div>
 
       <div className='app__body'>
@@ -161,7 +227,12 @@ function Shell() {
             <span className='faint small'>正在读取后台状态…</span>
           </div>
         ) : (
-          <div className='app__pane' role='tabpanel'>
+          <div
+            className={
+              tab === 'copilot' || tab === 'chat' ? 'app__pane app__pane--fill' : 'app__pane'
+            }
+            role='tabpanel'
+          >
             {tab === 'copilot' ? <CopilotTab worker={worker} /> : null}
             {tab === 'chat' ? (
               <ChatTab worker={worker} onOpenCase={openCase} onOpenRun={openRun} />
