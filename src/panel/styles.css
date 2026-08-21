@@ -1342,21 +1342,46 @@ textarea.mono {
   justify-content: center;
 }
 
-.chat__savepanel {
-  border-top: 1px solid var(--border);
-  background: var(--bg-elev);
-  padding: 8px 10px;
+/* Save-as-script modal. The side panel is narrow, so the modal fills it and the
+   step list gets a draggable height to make long recordings reviewable. */
+.saveform {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  max-height: 40%;
-  overflow-y: auto;
+  gap: 8px;
+  padding: 10px 12px;
+  min-height: 0;
+}
+
+.saveform__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.saveform__bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px;
+  border-bottom: 1px solid var(--border);
+}
+
+.save-count {
+  align-self: center;
 }
 
 .chat__steps {
   display: flex;
   flex-direction: column;
   gap: 3px;
+}
+
+.chat__steps--modal {
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  padding: 4px;
 }
 
 .chat__step {
@@ -1367,8 +1392,41 @@ textarea.mono {
   border-radius: var(--radius);
 }
 
+.chat__step--all {
+  font-weight: 600;
+}
+
+.chat__step-index {
+  flex: 0 0 auto;
+  min-width: 22px;
+  text-align: right;
+}
+
 .chat__step:hover {
   background: var(--bg);
+}
+
+.saveform__resize {
+  position: relative;
+  height: 10px;
+  margin: -2px 0 0;
+  cursor: ns-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.saveform__resize span {
+  display: block;
+  width: 36px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border-strong);
+  opacity: 0.7;
+}
+
+.saveform__resize:hover span {
+  background: var(--accent);
 }
 
 /* A tool call that is waiting for the user to approve or decline. */

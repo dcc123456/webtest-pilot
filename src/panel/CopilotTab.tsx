@@ -25,6 +25,7 @@ import {
   Button,
   Collapsible,
   Empty,
+  Modal,
   Notice,
   usePending,
   useToast,
@@ -67,6 +68,9 @@ export function CopilotTab({ worker }: { worker: WorkerApi }) {
   const [selectedSteps, setSelectedSteps] = useState<Set<number>>(new Set())
   const [scriptName, setScriptName] = useState('')
   const [showSave, setShowSave] = useState(false)
+  // Height (px) of the step list inside the save modal. Dragging the handle
+  // resizes it so long recordings are easy to review in the narrow side panel.
+  const [stepsHeight, setStepsHeight] = useState(260)
   const [openTools, setOpenTools] = useState<Record<string, boolean>>({})
 
   const sending = usePending()
@@ -265,6 +269,42 @@ export function CopilotTab({ worker }: { worker: WorkerApi }) {
     void call({ type: 'cancelConversation' })
   }, [call])
 
+  // Drag-to-resize for the step list in the save modal. The panel has a fixed
+  // width but plenty of vertical room, so this lets the user grow the list to
+  // review long recordings without scrolling the whole modal.
+  const startStepsResize = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      event.preventDefault()
+      const startY = event.clientY
+      const startHeight = stepsHeight
+      const onMove = (move: MouseEvent): void => {
+        // Dragging up (negative delta) grows the list; clamp to a sane range.
+        const next = Math.max(120, Math.min(640, startHeight - (move.clientY - startY)))
+        setStepsHeight(next)
+      }
+      const onUp = (): void => {
+        window.removeEventListener('mousemove', onMove)
+        window.removeEventListener('mouseup', onUp)
+        document.body.style.userSelect = ''
+      }
+      document.body.style.userSelect = 'none'
+      window.addEventListener('mousemove', onMove)
+      window.addEventListener('mouseup', onUp)
+    },
+    [stepsHeight],
+  )
+
+  const allSelected =
+    lastSteps.length > 0 && selectedSteps.size === lastSteps.length
+
+  const toggleAll = useCallback(() => {
+    setSelectedSteps((current) =>
+      current.size === lastSteps.length
+        ? new Set()
+        : new Set(lastSteps.map((_, index) => index)),
+    )
+  }, [lastSteps])
+
   const saveScript = useCallback(() => {
     const indices = [...selectedSteps].sort((a, b) => a - b)
     if (indices.length === 0) {
@@ -391,42 +431,76 @@ export function CopilotTab({ worker }: { worker: WorkerApi }) {
       ) : null}
 
       {showSave ? (
-        <div className='chat__savepanel'>
-          <span className='dim small'>勾选要保存的步骤，命名后保存为可回放脚本。</span>
-          <div className='chat__steps'>
-            {lastSteps.map((step, index) => (
-              <label className='chat__step' key={index}>
-                <input
-                  type='checkbox'
-                  checked={selectedSteps.has(index)}
-                  onChange={(event) =>
-                    setSelectedSteps((current) => {
-                      const next = new Set(current)
-                      if (event.target.checked) next.add(index)
-                      else next.delete(index)
-                      return next
-                    })
-                  }
-                />
-                <span className='small'>{describeStep(step)}</span>
+        <Modal
+          title='保存为脚本'
+          onClose={() => setShowSave(false)}
+          footer={
+            <>
+              <span className='dim small save-count'>
+                已选 {selectedSteps.size} / {lastSteps.length} 步
+              </span>
+              <span className='spacer' />
+              <Button small variant='ghost' onClick={() => setShowSave(false)}>
+                取消
+              </Button>
+              <Button small variant='primary' pending={sending.pending} onClick={saveScript}>
+                保存
+              </Button>
+            </>
+          }
+        >
+          <div className='saveform'>
+            <label className='saveform__field'>
+              <span className='small dim'>脚本名称</span>
+              <input
+                type='text'
+                placeholder='给这段操作起个名字'
+                value={scriptName}
+                onChange={(event) => setScriptName(event.target.value)}
+                autoFocus
+              />
+            </label>
+            <div className='saveform__bar'>
+              <label className='chat__step chat__step--all'>
+                <input type='checkbox' checked={allSelected} onChange={toggleAll} />
+                <span className='small'>全选 / 全不选</span>
               </label>
-            ))}
+              <span className='small dim'>勾选要保存进脚本的步骤</span>
+            </div>
+            <div
+              className='chat__steps chat__steps--modal'
+              style={{ height: stepsHeight }}
+            >
+              {lastSteps.map((step, index) => (
+                <label className='chat__step' key={index}>
+                  <input
+                    type='checkbox'
+                    checked={selectedSteps.has(index)}
+                    onChange={(event) =>
+                      setSelectedSteps((current) => {
+                        const next = new Set(current)
+                        if (event.target.checked) next.add(index)
+                        else next.delete(index)
+                        return next
+                      })
+                    }
+                  />
+                  <span className='chat__step-index small dim'>{index + 1}</span>
+                  <span className='small'>{describeStep(step)}</span>
+                </label>
+              ))}
+            </div>
+            <div
+              className='saveform__resize'
+              role='separator'
+              aria-orientation='horizontal'
+              title='上下拖拽调整步骤列表高度'
+              onMouseDown={startStepsResize}
+            >
+              <span />
+            </div>
           </div>
-          <div className='row'>
-            <input
-              type='text'
-              placeholder='脚本名称'
-              value={scriptName}
-              onChange={(event) => setScriptName(event.target.value)}
-            />
-            <Button small variant='primary' onClick={saveScript}>
-              保存
-            </Button>
-            <Button small variant='ghost' onClick={() => setShowSave(false)}>
-              取消
-            </Button>
-          </div>
-        </div>
+        </Modal>
       ) : null}
 
       <div className='chat__compose'>
