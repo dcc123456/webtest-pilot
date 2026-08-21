@@ -265,13 +265,24 @@ function RunRow({
 
 function StepLine({ step }: { step: StepRecord }) {
   return (
-    <div className='step'>
+    <div className={`step${step.skipped ? ' step--skipped' : ''}`}>
       <span className='step__index'>{step.index + 1}</span>
-      <span className={step.ok ? 'step__mark step__mark--ok' : 'step__mark step__mark--bad'}>
-        {step.ok ? '✓' : '✕'}
+      <span
+        className={
+          step.skipped
+            ? 'step__mark step__mark--skip'
+            : step.ok
+              ? 'step__mark step__mark--ok'
+              : 'step__mark step__mark--bad'
+        }
+      >
+        {step.skipped ? '–' : step.ok ? '✓' : '✕'}
       </span>
       <span className='step__main'>
-        <span className='step__desc'>{step.description}</span>
+        <span className='step__desc'>
+          {step.description}
+          {step.skipped ? <span className='faint small'> （已禁用，跳过）</span> : null}
+        </span>
         <span className='faint small'>
           {formatDuration(step.durationMs)}
           {step.attempts !== undefined && step.attempts > 1 ? ` · 重试 ${step.attempts} 次` : ''}

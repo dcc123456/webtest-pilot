@@ -57,6 +57,14 @@ export interface ScriptStep {
   /** Per-step timeout override in ms. */
   timeoutMs?: number
   /**
+   * When true the step is kept in the script but skipped at replay time.
+   *
+   * Disabling rather than deleting lets a user temporarily turn off a step that
+   * is flaky or not relevant to a particular environment without losing the
+   * recorded selector/value; the run record marks it as skipped.
+   */
+  disabled?: boolean
+  /**
    * When true, a failure is recorded but does not fail the run. For steps that
    * handle conditional UI — a cookie banner that may or may not appear.
    */
@@ -183,6 +191,8 @@ export interface StepRecord {
   ok: boolean
   startedAt: number
   durationMs: number
+  /** True when the step was disabled in the script and therefore not executed. */
+  skipped?: boolean
   error?: string
   /** How many attempts it took, when more than one was needed. */
   attempts?: number

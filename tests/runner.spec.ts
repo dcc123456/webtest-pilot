@@ -232,6 +232,27 @@ describe('runScript: optional steps', () => {
   })
 })
 
+describe('runScript: disabled steps', () => {
+  it('skips disabled steps without driving the page, but keeps positional records', async () => {
+    const driver = new FakeDriver()
+    const result = await runScript(
+      script([
+        { action: 'click', target: clickTarget, disabled: true, note: 'turned off' },
+        { action: 'fill', target: fieldTarget, value: 'x' },
+      ]),
+      { driver, context: context() },
+    )
+    expect(result.status).toBe('passed')
+    expect(result.steps).toHaveLength(2)
+    expect(result.steps[0]).toMatchObject({ index: 0, ok: true, skipped: true })
+    expect(result.steps[1]).toMatchObject({ index: 1, ok: true })
+    expect(result.steps[1]?.skipped).toBeUndefined()
+    // The disabled click must never reach the driver.
+    expect(driver.calls.some((call) => call.op?.action === 'click')).toBe(false)
+    expect(driver.calls.some((call) => call.op?.action === 'fill')).toBe(true)
+  })
+})
+
 describe('runScript: secrets', () => {
   it('substitutes a secret value without putting it in the record', async () => {
     const driver = new FakeDriver()

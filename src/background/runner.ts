@@ -210,6 +210,25 @@ export async function runScript(
     }
 
     const description = describeStep(step)
+
+    // A disabled step is part of the script but deliberately not executed. It is
+    // recorded as skipped (ok, no error) so the report stays positionally
+    // consistent with the editor, rather than silently vanishing from the count.
+    if (step.disabled) {
+      const record: StepRecord = {
+        index,
+        action: step.action,
+        description,
+        ok: true,
+        startedAt: Date.now(),
+        durationMs: 0,
+        skipped: true,
+      }
+      steps.push(record)
+      events?.onStepDone?.(record)
+      continue
+    }
+
     events?.onStepStart?.(index, description)
     const startedAt = Date.now()
     const timeout = step.timeoutMs ?? stepTimeoutMs

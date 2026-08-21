@@ -1179,6 +1179,14 @@ textarea.mono {
   color: var(--fail);
 }
 
+.step__mark--skip {
+  color: var(--text-faint);
+}
+
+.step--skipped .step__desc {
+  color: var(--text-faint);
+}
+
 .step__main {
   min-width: 0;
   flex: 1 1 auto;
@@ -1186,6 +1194,15 @@ textarea.mono {
 
 .step__desc {
   overflow-wrap: anywhere;
+}
+
+.step--disabled .step__desc {
+  color: var(--text-faint);
+  text-decoration: line-through;
+}
+
+.step--disabled .step__index {
+  color: var(--text-faint);
 }
 
 .step__error {
@@ -1460,5 +1477,91 @@ textarea.mono {
   font-size: 14px;
   line-height: 1;
   padding: 0 0 0 4px;
+}
+
+/* Script step editor (Scripts tab → 编辑步骤). */
+.scriptedit {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  min-height: 0;
+}
+
+.scriptedit__hint {
+  line-height: 1.4;
+}
+
+.scriptedit__list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elev);
+  padding: 4px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.scriptedit__step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: var(--radius);
+}
+
+.scriptedit__step:hover {
+  background: var(--bg);
+}
+
+.scriptedit__step--off .scriptedit__desc {
+  color: var(--text-faint);
+  text-decoration: line-through;
+}
+
+.scriptedit__enable {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+}
+
+.scriptedit__desc {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.scriptedit__actions {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.linklike {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.linklike:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.linklike:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.linklike--danger:hover:not(:disabled) {
+  color: var(--fail);
 }
 

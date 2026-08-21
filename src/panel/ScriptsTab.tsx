@@ -19,7 +19,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { is } from '../lib/messages'
 import { describeStep, describeValue } from '../lib/script'
-import type { TestScript } from '../lib/types'
+import type { ScriptStep, TestScript } from '../lib/types'
 import {
   Badge,
   Button,
@@ -78,6 +78,7 @@ export function ScriptsTab({
   const [exporting, setExporting] = useState<{ script: TestScript; format: ExportFormat } | null>(
     null,
   )
+  const [editing, setEditing] = useState<TestScript | null>(null)
   const importRun = usePending()
   const downloadRun = usePending()
   const toast = useToast()
@@ -184,8 +185,21 @@ export function ScriptsTab({
           onExport={(format) => setExporting({ script, format })}
           onDownload={() => downloadScripts([script], safeFileName(script.name, 'json'))}
           onOpenRun={onOpenRun}
+          onEdit={() => setEditing(script)}
         />
       ))}
+
+      {editing ? (
+        <ScriptEditor
+          script={editing}
+          worker={worker}
+          onClose={() => setEditing(null)}
+          onSaved={(updated) => {
+            setEditing(null)
+            toast.success(`已保存「${updated.name}」`)
+          }}
+        />
+      ) : null}
 
       {exporting ? (
         <ExportView
@@ -208,6 +222,7 @@ function ScriptRow({
   onExport,
   onDownload,
   onOpenRun,
+  onEdit,
 }: {
   script: TestScript
   caseName: string | undefined
@@ -217,6 +232,7 @@ function ScriptRow({
   onExport: (format: ExportFormat) => void
   onDownload: () => void
   onOpenRun: (runId: string) => void
+  onEdit: () => void
 }) {
   const { call } = worker
   const toast = useToast()
@@ -225,6 +241,7 @@ function ScriptRow({
   const optionalCount = script.steps.filter((step) => step.optional === true).length
   const secretCount = script.steps.filter((step) => step.secretRef !== undefined).length
   const proposedCount = script.steps.filter((step) => step.proposedFix !== undefined).length
+  const disabledCount = script.steps.filter((step) => step.disabled === true).length
 
   return (
     <div className='card'>
@@ -233,6 +250,11 @@ function ScriptRow({
         <Badge tone='neutral' title={`共 ${script.steps.length} 个步骤`}>
           {script.steps.length} 步
         </Badge>
+        {disabledCount > 0 ? (
+          <Badge tone='neutral' title='回放时会跳过这些被禁用的步骤'>
+            {disabledCount} 已禁用
+          </Badge>
+        ) : null}
       </div>
 
       <span className='faint small' title={caseName ?? '这个脚本没有关联的测试用例'}>
@@ -293,6 +315,9 @@ function ScriptRow({
         <Button small onClick={() => onExport('markdown')}>
           导出 Markdown
         </Button>
+        <Button small onClick={onEdit}>
+          编辑步骤
+        </Button>
       </div>
 
       <Collapsible
@@ -303,11 +328,15 @@ function ScriptRow({
         {script.steps.map((step, index) => (
           // Steps are positional and two identical steps are legitimate, so the
           // index is the only stable identity.
-          <div className='step' key={`${script.id}-${index}`}>
+          <div
+            className={`step${step.disabled ? ' step--disabled' : ''}`}
+            key={`${script.id}-${index}`}
+          >
             <span className='step__index'>{index + 1}</span>
             <span className='step__main'>
               <span className='step__desc'>{describeStep(step)}</span>
               {step.optional ? <span className='faint small'> （可选）</span> : null}
+              {step.disabled ? <span className='faint small'> （已禁用，回放时跳过）</span> : null}
               {step.secretRef ? (
                 <span className='faint small' title='真实值保存在后台，不会出现在脚本或导出文件里'>
                   {' '}
@@ -328,6 +357,159 @@ function ScriptRow({
         }}
       />
     </div>
+  )
+}
+
+/**
+ * Edits a saved script's step list: enable/disable individual steps and remove
+ * steps, without re-recording.
+ *
+ * The draft is a local copy until "保存" writes it back through `saveScript`,
+ * which restamps `updatedAt`. Disabled steps are kept (not deleted) so they can
+ * be turned back on later; the runner records them as skipped.
+ */
+function ScriptEditor({
+  script,
+  worker,
+  onClose,
+  onSaved,
+}: {
+  script: TestScript
+  worker: WorkerApi
+  onClose: () => void
+  onSaved: (updated: TestScript) => void
+}) {
+  const { call } = worker
+  const toast = useToast()
+  const saving = usePending()
+  const [steps, setSteps] = useState<ScriptStep[]>(() =>
+    script.steps.map((step) => ({ ...step })),
+  )
+  const [name, setName] = useState(script.name)
+
+  const enabledCount = steps.filter((step) => !step.disabled).length
+
+  const toggle = (index: number): void => {
+    setSteps((current) =>
+      current.map((step, i) =>
+        i === index ? { ...step, disabled: step.disabled ? undefined : true } : step,
+      ),
+    )
+  }
+
+  const remove = (index: number): void => {
+    setSteps((current) => current.filter((_, i) => i !== index))
+  }
+
+  const move = (index: number, direction: -1 | 1): void => {
+    setSteps((current) => {
+      const target = index + direction
+      if (target < 0 || target >= current.length) return current
+      const next = [...current]
+      const [item] = next.splice(index, 1)
+      if (!item) return current
+      next.splice(target, 0, item)
+      return next
+    })
+  }
+
+  const save = (): void => {
+    if (steps.length === 0) {
+      toast.error('至少保留一个步骤；要清空请直接删除整个脚本。')
+      return
+    }
+    if (!name.trim()) {
+      toast.error('请填写脚本名称。')
+      return
+    }
+    void saving.run(async () => {
+      const updated: TestScript = { ...script, name: name.trim(), steps }
+      const response = await call({ type: 'saveScript', script: updated })
+      if (is.script(response)) onSaved(response.script)
+      else toast.error(is.message(response) ? response.message : '保存失败。')
+    })
+  }
+
+  return (
+    <Modal
+      title={`编辑步骤：${script.name}`}
+      onClose={onClose}
+      footer={
+        <>
+          <span className='dim small'>
+            已启用 {enabledCount} / {steps.length} 步
+          </span>
+          <span className='spacer' />
+          <Button variant='ghost' small onClick={onClose}>
+            取消
+          </Button>
+          <Button variant='primary' small pending={saving.pending} onClick={save}>
+            保存
+          </Button>
+        </>
+      }
+    >
+      <div className='scriptedit'>
+        <label className='saveform__field'>
+          <span className='small dim'>脚本名称</span>
+          <input
+            type='text'
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            autoFocus
+          />
+        </label>
+        <div className='scriptedit__hint small dim'>
+          取消勾选即禁用该步骤（保留在脚本里，回放时跳过并记为 skipped）；也可以上移/下移调整顺序，或直接删除。
+        </div>
+        <div className='scriptedit__list'>
+          {steps.map((step, index) => (
+            <div
+              className={`scriptedit__step${step.disabled ? ' scriptedit__step--off' : ''}`}
+              key={index}
+            >
+              <label className='scriptedit__enable' title={step.disabled ? '启用以回放' : '禁用（回放时跳过）'}>
+                <input
+                  type='checkbox'
+                  checked={!step.disabled}
+                  onChange={() => toggle(index)}
+                />
+              </label>
+              <span className='chat__step-index small dim'>{index + 1}</span>
+              <span className='scriptedit__desc small'>{describeStep(step)}</span>
+              <span className='scriptedit__actions'>
+                <button
+                  type='button'
+                  className='linklike small'
+                  title='上移'
+                  disabled={index === 0}
+                  onClick={() => move(index, -1)}
+                >
+                  ↑
+                </button>
+                <button
+                  type='button'
+                  className='linklike small'
+                  title='下移'
+                  disabled={index === steps.length - 1}
+                  onClick={() => move(index, 1)}
+                >
+                  ↓
+                </button>
+                <button
+                  type='button'
+                  className='linklike linklike--danger small'
+                  title='删除该步骤'
+                  onClick={() => remove(index)}
+                >
+                  删除
+                </button>
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </Modal>
   )
 }
 
