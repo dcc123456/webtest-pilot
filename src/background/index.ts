@@ -18,6 +18,7 @@ import { listModels, testConnection } from '../lib/llm'
 import { parseCasesMarkdown, toTestCase } from '../lib/markdown'
 import { broadcast, type PanelRequest, type PanelResponse, type PanelState } from '../lib/messages'
 import { exportPlaywright, exportScriptMarkdown, toScriptJson } from '../lib/script'
+import { buildBundle, parseBundle, toBundleJson } from '../lib/share'
 import {
   LIMITS,
   appendLog,
@@ -47,6 +48,7 @@ import {
   saveCases,
   saveSchedule,
   saveScript,
+  saveScripts,
   saveSecret,
   saveSettings,
   storageUsage,
@@ -463,6 +465,49 @@ async function handlePanelRequest(request: PanelRequest): Promise<PanelResponse>
             ? exportScriptMarkdown(script)
             : toScriptJson(script)
       return { ok: true, text }
+    }
+
+    case 'exportScriptBundle': {
+      const all = await getScripts()
+      // An empty selection means "all", which is what the "export everything"
+      // button sends; filtering to nothing would silently produce an empty file.
+      const wanted =
+        request.scriptIds.length > 0
+          ? all.filter((script) => request.scriptIds.includes(script.id))
+          : all
+      if (wanted.length === 0) return { ok: false, error: '没有可导出的脚本。' }
+      const bundle = buildBundle(wanted, await getCases())
+      return { ok: true, text: toBundleJson(bundle) }
+    }
+
+    case 'importScriptBundle': {
+      let parsed: ReturnType<typeof parseBundle>
+      try {
+        parsed = parseBundle(request.json, (prefix) => newId(prefix))
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) }
+      }
+      if (parsed.cases.length > 0) await saveCases(parsed.cases)
+      await saveScripts(parsed.scripts)
+
+      // Report secrets the bundle needs but this profile lacks. Without this the
+      // recipient discovers the gap when a run fails partway through a login.
+      const have = new Set((await getSecrets()).map((entry) => entry.name))
+      const missing = parsed.requiredSecrets.filter((name) => !have.has(name))
+
+      broadcast({ type: 'stateChanged' })
+      const parts = [`已导入 ${parsed.scripts.length} 个脚本`]
+      if (parsed.cases.length > 0) parts.push(`${parsed.cases.length} 个测试用例`)
+      let message = `${parts.join('、')}。`
+      if (missing.length > 0) {
+        message += `\n\n这些脚本需要以下密钥，但你还没有配置：${missing.join('、')}。请到「设置 → 密钥」添加后再运行。`
+      }
+      await appendLog({
+        level: 'info',
+        source: 'import',
+        message: `导入脚本分享包：${parsed.scripts.length} 个脚本、${parsed.cases.length} 个用例。`,
+      })
+      return { ok: true, message }
     }
 
     case 'deleteRun': {

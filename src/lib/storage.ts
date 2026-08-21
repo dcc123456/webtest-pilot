@@ -252,6 +252,24 @@ export function deleteScript(id: string): Promise<void> {
   })
 }
 
+/**
+ * Saves several scripts in one write.
+ *
+ * Used by bundle import. Calling `saveScript` per script would serialize a
+ * read-modify-write for each one through the queue, so importing twenty scripts
+ * would mean twenty full rewrites of the list.
+ */
+export function saveScripts(scripts: TestScript[]): Promise<TestScript[]> {
+  return enqueue(async () => {
+    const all = await getScripts()
+    const byId = new Map(all.map((script) => [script.id, script]))
+    const stamped = scripts.map((script) => ({ ...script, updatedAt: Date.now() }))
+    for (const script of stamped) byId.set(script.id, script)
+    await writeKey(KEYS.scripts, [...byId.values()])
+    return stamped
+  })
+}
+
 // --- Runs -------------------------------------------------------------------
 
 export function getRuns(): Promise<TestRun[]> {

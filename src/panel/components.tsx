@@ -625,6 +625,60 @@ export function safeFileName(name: string, extension: string): string {
   return `${base}.${extension}`
 }
 
+/**
+ * A button that reads a text file the user picks.
+ *
+ * A file picker rather than a paste box: a shared bundle arrives as a file, and
+ * asking someone to open it, select all, and paste adds three steps that can go
+ * wrong for no benefit. The input is kept out of the layout and clicked
+ * programmatically because a bare `<input type='file'>` cannot be styled to match
+ * the other buttons.
+ */
+export function FilePickButton({
+  accept,
+  label,
+  onText,
+  onError,
+  small = true,
+  pending = false,
+}: {
+  accept: string
+  label: string
+  onText: (text: string, fileName: string) => void
+  onError?: (message: string) => void
+  small?: boolean
+  pending?: boolean
+}) {
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  return (
+    <>
+      <input
+        ref={inputRef}
+        type='file'
+        accept={accept}
+        hidden
+        onChange={(event) => {
+          const file = event.target.files?.[0]
+          // Reset first: picking the same file twice in a row fires no change
+          // event otherwise, which looks like the button silently failing.
+          event.target.value = ''
+          if (!file) return
+          file
+            .text()
+            .then((text) => onText(text, file.name))
+            .catch((cause: unknown) => {
+              onError?.(cause instanceof Error ? cause.message : String(cause))
+            })
+        }}
+      />
+      <Button small={small} pending={pending} onClick={() => inputRef.current?.click()}>
+        {label}
+      </Button>
+    </>
+  )
+}
+
 // --- Small helpers ---------------------------------------------------------
 
 /**

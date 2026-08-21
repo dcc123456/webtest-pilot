@@ -199,6 +199,25 @@ describe('cases and scripts', () => {
     const saved = await mod.saveScript(script({ updatedAt: 0 }))
     expect(saved.updatedAt).toBeGreaterThan(0)
   })
+
+  it('saves a batch in one write, keeping existing scripts', async () => {
+    await mod.saveScript(script({ id: 'mine' }))
+    await mod.saveScripts([script({ id: 'a' }), script({ id: 'b' })])
+    const ids = (await mod.getScripts()).map((entry) => entry.id).sort()
+    // Import must add, not replace: the user's own script survives.
+    expect(ids).toEqual(['a', 'b', 'mine'])
+  })
+
+  it('stamps every script in a batch', async () => {
+    const saved = await mod.saveScripts([script({ id: 'a', updatedAt: 0 })])
+    expect(saved[0]?.updatedAt).toBeGreaterThan(0)
+  })
+
+  it('accepts an empty batch without disturbing storage', async () => {
+    await mod.saveScript(script({ id: 'mine' }))
+    await mod.saveScripts([])
+    expect((await mod.getScripts()).map((entry) => entry.id)).toEqual(['mine'])
+  })
 })
 
 describe('runs', () => {
