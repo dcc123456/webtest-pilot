@@ -794,10 +794,10 @@ textarea.mono {
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 10px;
+  padding: 12px;
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 10px;
 }
 
 .chat__compose {
@@ -809,38 +809,72 @@ textarea.mono {
   gap: 6px;
 }
 
+/*
+  Chat bubbles, modelled on a messenger layout: user text sits right-aligned as a
+  compact accent bubble, assistant text is a plain left-aligned panel bubble, and
+  structural content (tool rows, run cards, parsed cases) is allowed to flow full
+  width rather than being squeezed into one side.
+*/
 .msg {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
+  max-width: 92%;
+  padding: 8px 11px;
+  border-radius: 10px;
+  border: 1px solid transparent;
   min-width: 0;
-  padding: 7px 9px;
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border);
-  background: var(--bg-elev);
   overflow-wrap: anywhere;
 }
 
 .msg--user {
-  background: var(--accent-soft);
-  border-color: transparent;
-  margin-left: 22px;
+  align-self: flex-end;
+  background: var(--accent);
+  color: var(--accent-text);
+  border-radius: 10px 10px 3px 10px;
 }
 
 .msg--assistant {
+  align-self: flex-start;
   background: var(--bg-elev);
+  border-color: var(--border);
+  border-radius: 10px 10px 10px 3px;
 }
 
+/*
+  Structural messages (run cards, parsed case lists) are not conversational turns
+  and look wrong pinned to one side. They span the whole log like a section.
+*/
+.msg--wide {
+  max-width: 100%;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/*
+  System and status lines are inline prose, not cards: a dashed border and a
+  background makes the agent's own notes feel like more output than they are.
+  Italic, dimmed, and unbounded matches how the conversation reads.
+*/
 .msg--system {
-  background: var(--bg-sunken);
-  border-style: dashed;
+  align-self: center;
+  max-width: 96%;
+  background: transparent;
+  border-color: transparent;
   color: var(--text-dim);
   font-size: 11.5px;
+  font-style: italic;
+  text-align: center;
+  padding: 0 8px;
 }
 
 .msg--error {
+  align-self: center;
+  max-width: 96%;
   background: var(--fail-soft);
   border-color: var(--fail);
+  color: var(--fail);
+  font-style: normal;
+  text-align: left;
 }
 
 .msg__role {
@@ -856,10 +890,13 @@ textarea.mono {
   overflow-wrap: anywhere;
 }
 
+/* The streaming caret uses currentColor so it stays visible on both the accent
+   user bubble and the assistant panel. User messages do not stream, but the rule
+   is harmless there. */
 .msg__caret {
   display: inline-block;
   width: 6px;
-  background: var(--text-dim);
+  background: currentColor;
   animation: blink 1s steps(2, start) infinite;
 }
 
@@ -870,6 +907,8 @@ textarea.mono {
 }
 
 .tool-row {
+  align-self: flex-start;
+  max-width: 92%;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-sunken);

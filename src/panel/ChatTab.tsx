@@ -262,14 +262,12 @@ export function ChatTab({
             case 'user':
               return (
                 <div className='msg msg--user' key={entry.id}>
-                  <span className='msg__role'>我</span>
                   <span className='msg__text'>{entry.text}</span>
                 </div>
               )
             case 'assistant':
               return (
                 <div className='msg msg--assistant' key={entry.id}>
-                  <span className='msg__role'>智能体（agent）</span>
                   <span className='msg__text'>
                     {entry.text}
                     {state.activeRunIds.includes(entry.runId) ? (
@@ -330,9 +328,8 @@ export function ChatTab({
               )
             case 'cases':
               return (
-                <div className='msg msg--assistant' key={entry.id}>
-                  <span className='msg__role'>解析结果</span>
-                  <span className='dim small'>
+                <div className='msg msg--assistant msg--wide' key={entry.id}>
+                  <span className='faint small'>
                     解析出 {entry.caseIds.length} 个测试用例，已保存。可以直接运行，也可以先编辑。
                   </span>
                   {entry.caseIds.map((caseId) => {
@@ -360,7 +357,7 @@ export function ChatTab({
               const active = state.activeRunIds.includes(run.id)
               const okSteps = run.steps.filter((step) => step.ok).length
               return (
-                <div className='msg msg--assistant' key={entry.id}>
+                <div className='msg msg--assistant msg--wide' key={entry.id}>
                   <span className='row row--wrap'>
                     <StatusBadge status={run.status} />
                     <Truncated text={run.caseName} />
