@@ -127,7 +127,7 @@ export interface OrchestratorDeps {
 }
 
 /** The real implementations, used unless a caller injects otherwise. */
-const chromeDeps: OrchestratorDeps = {
+export const chromeDeps: OrchestratorDeps = {
   createDriver: (allowedSites) => new ChromeDriver(allowedSites),
   openTab: openRunTab,
   closeTab: closeRunTab,
@@ -267,7 +267,7 @@ async function resolveScript(options: StartOptions): Promise<TestScript | undefi
  * closed at the end. That fallback needs a URL to be worth anything: a blank tab
  * is a new-tab page, which no extension may script.
  */
-async function openContext(
+export async function openContext(
   startUrl: string,
   deps: OrchestratorDeps,
   allowedSites: string[],

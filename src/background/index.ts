@@ -21,6 +21,7 @@ import { exportPlaywright, exportScriptMarkdown, toScriptJson } from '../lib/scr
 import { buildBundle, parseBundle, toBundleJson } from '../lib/share'
 import {
   LIMITS,
+  activeProvider,
   appendLog,
   clearLogs,
   clearRuns,
@@ -29,6 +30,7 @@ import {
   deleteSchedule,
   deleteScript,
   deleteSecret,
+  deleteSkill,
   exportAll,
   getCase,
   getCases,
@@ -40,6 +42,8 @@ import {
   getScripts,
   getSecrets,
   getSettings,
+  getSkill,
+  getSkills,
   importAll,
   newId,
   patchSchedule,
@@ -51,9 +55,12 @@ import {
   saveScripts,
   saveSecret,
   saveSettings,
+  saveSkill,
   storageUsage,
 } from '../lib/storage'
-import type { ScheduleEntry, TestRun } from '../lib/types'
+import type { ScheduleEntry, Settings, TestRun, TestScript } from '../lib/types'
+import { SCRIPT_VERSION } from '../lib/types'
+import type { RunContext } from './driver'
 import { StartError, startRun, type RunObserver, type ToolCallReport } from './orchestrator'
 import {
   appendAssistantDelta,
@@ -66,6 +73,9 @@ import {
   reconcileTranscripts,
 } from './transcript'
 import { TICK_ALARM, installScheduler, onTick, refreshNextRun, resyncSchedules } from './scheduler'
+import { converse, type PendingChatAction } from './converse'
+import { conversation, toolEventToBroadcast } from './conversation'
+import { chromeDeps, openContext } from './orchestrator'
 
 /**
  * Cancellation handles for runs executing right now.
@@ -692,7 +702,284 @@ async function handlePanelRequest(request: PanelRequest): Promise<PanelResponse>
         },
       }
     }
+
+    // --- Open-ended conversation --------------------------------------------
+
+    case 'converse': {
+      if (conversation.running) {
+        return { ok: false, error: '上一轮对话还在进行，请稍候或先取消。' }
+      }
+      const settings = await getSettings()
+      const provider = await activeProvider()
+      if (!provider || !provider.apiKey.trim()) {
+        return {
+          ok: false,
+          error: '尚未配置模型（provider）。请在「设置 → 模型」中填写。',
+        }
+      }
+
+      let activeSkill: import('../lib/types').Skill | null = null
+      if (request.skillId) {
+        const found = await getSkill(request.skillId)
+        if (!found) return { ok: false, error: '找不到所选的技能（skill）。' }
+        activeSkill = found
+      }
+      const skills = await getSkills()
+      const catalogue = activeSkill ? [] : skills.filter((skill) => skill.autoMatch)
+
+      const confirmMode = request.confirmMode ?? settings.policy.confirmMode
+      conversation.confirmMode = confirmMode
+      conversation.activeSkill = activeSkill
+
+      // Take over the user's current tab, the same way a manual run does: no new
+      // window, inherited session and data.
+      let context: RunContext
+      let ownTab: number | undefined
+      try {
+        const opened = await openContext('', chromeDeps, settings.policy.allowedSites)
+        context = opened.context
+        ownTab = opened.ownTab
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        }
+      }
+
+      const secrets = await getSecrets()
+      const secretValues = new Map(secrets.map((secret) => [secret.name, secret.value]))
+
+      const controller = new AbortController()
+      conversation.abort = controller
+      conversation.running = true
+      conversation.pending = null
+      broadcast({ type: 'stateChanged' })
+
+      const userText = request.message
+      broadcast({ type: 'convUser', text: userText, at: Date.now() })
+
+      // Not awaited: the panel gets its reply now and streams events afterward.
+      void runConversation({
+        userText,
+        context,
+        ownTab,
+        controller,
+        provider,
+        settings,
+        activeSkill,
+        catalogue,
+        confirmMode,
+        secretValues,
+        secretNames: secrets.map((secret) => secret.name),
+      })
+      return { ok: true }
+    }
+
+    case 'cancelConversation': {
+      conversation.abort?.abort()
+      if (conversation.pending) {
+        conversation.pending.resolve(false)
+        conversation.pending = null
+      }
+      return { ok: true }
+    }
+
+    case 'approveAction': {
+      if (!conversation.pending || conversation.pending.id !== request.pendingId) {
+        return { ok: false, error: '该操作已过期或已被处理。' }
+      }
+      conversation.pending.resolve(request.approved)
+      conversation.pending = null
+      return { ok: true }
+    }
+
+    case 'clearConversation': {
+      conversation.reset()
+      broadcast({ type: 'convCleared', at: Date.now() })
+      broadcast({ type: 'stateChanged' })
+      return { ok: true }
+    }
+
+    case 'listSkills': {
+      return { ok: true, message: JSON.stringify(await getSkills()) }
+    }
+
+    case 'saveSkill': {
+      await saveSkill(request.skill)
+      broadcast({ type: 'stateChanged' })
+      return { ok: true }
+    }
+
+    case 'deleteSkill': {
+      await deleteSkill(request.skillId)
+      broadcast({ type: 'stateChanged' })
+      return { ok: true }
+    }
+
+    case 'saveConversationScript': {
+      if (conversation.lastSteps.length === 0) {
+        return { ok: false, error: '上一轮对话没有可保存的操作。' }
+      }
+      const selected =
+        request.indices && request.indices.length > 0
+          ? request.indices
+              .map((index) => conversation.lastSteps[index])
+              .filter((step): step is NonNullable<typeof step> => Boolean(step))
+          : conversation.lastSteps
+      if (selected.length === 0) {
+        return { ok: false, error: '没有选择任何步骤。' }
+      }
+      const script: TestScript = {
+        id: newId('script'),
+        name: request.name.trim() || '对话录制脚本',
+        startUrl: request.startUrl,
+        steps: selected,
+        version: SCRIPT_VERSION,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      }
+      await saveScript(script)
+      broadcast({ type: 'stateChanged' })
+      return { ok: true, message: `已保存脚本「${script.name}」（${selected.length} 步）。` }
+    }
   }
+}
+
+/**
+ * Drives one conversational turn off the request path.
+ *
+ * Resolving the panel request before this starts matters: sending a message must
+ * feel instant, while the model round and any approval prompts happen as events.
+ * Errors are broadcast as a final status rather than thrown, because by the time
+ * they occur the request has already returned.
+ */
+async function runConversation(params: {
+  userText: string
+  context: RunContext
+  ownTab?: number
+  controller: AbortController
+  provider: Awaited<ReturnType<typeof activeProvider>>
+  settings: Settings
+  activeSkill: import('../lib/types').Skill | null
+  catalogue: import('../lib/types').Skill[]
+  confirmMode: import('../lib/types').ConfirmMode
+  secretValues: Map<string, string>
+  secretNames: string[]
+}): Promise<void> {
+  const { context, ownTab, controller, provider, settings, activeSkill, catalogue, confirmMode } =
+    params
+  const driver = chromeDeps.createDriver(settings.policy.allowedSites)
+  let assistantText = ''
+  try {
+    // The context carries a tabId, not a live tab; read the current URL/title for
+    // the system prompt so the model knows which page it is on.
+    let pageUrl = ''
+    let pageTitle = ''
+    try {
+      const tab = await chrome.tabs.get(context.tabId)
+      pageUrl = tab.url ?? ''
+      pageTitle = tab.title ?? ''
+    } catch {
+      /* tab may have closed; the model can still call snapshot */
+    }
+    const result = await converse(conversation.history, params.userText, {
+      driver,
+      context,
+      provider: {
+        apiKey: provider!.apiKey,
+        baseUrl: provider!.baseUrl,
+        model: provider!.model,
+        ...(provider!.label ? { label: provider!.label } : {}),
+        ...(provider!.headers ? { headers: provider!.headers } : {}),
+        ...(provider!.temperature !== undefined ? { temperature: provider!.temperature } : {}),
+        ...(provider!.maxTokens !== undefined ? { maxTokens: provider!.maxTokens } : {}),
+      },
+      activeSkill: activeSkill ?? undefined,
+      catalogue,
+      confirmMode,
+      secretNames: params.secretNames,
+      secretValues: params.secretValues,
+      selfHeal: settings.policy.selfHeal,
+      maxRounds: settings.policy.maxToolRounds,
+      allowedSites: settings.policy.allowedSites,
+      pageUrl,
+      pageTitle,
+      signal: controller.signal,
+      onText: (delta) => {
+        assistantText += delta
+        broadcast({ type: 'convAssistant', text: assistantText, at: Date.now() })
+      },
+      onStatus: (text) => broadcast({ type: 'convStatus', text, at: Date.now() }),
+      onPending: (action: PendingChatAction) => {
+        conversation.pending = {
+          id: action.id,
+          name: action.name,
+          args: action.argsSummary,
+          mutating: action.mutating,
+          resolve: action.decide,
+        }
+        broadcast({
+          type: 'convPending',
+          pendingId: action.id,
+          name: action.name,
+          args: action.argsSummary,
+          mutating: action.mutating,
+          at: Date.now(),
+        })
+      },
+      onTool: (event) => {
+        broadcast({ ...toolEventToBroadcast(event, Date.now()) })
+      },
+    })
+
+    // Persist the wire history so the next turn has multi-turn context, then cap
+    // it to avoid unbounded growth.
+    conversation.history = result.messages
+    conversation.lastSteps = result.steps
+    pruneConversationHistory()
+    broadcast({
+      type: 'convDone',
+      steps: result.steps,
+      ...(result.stoppedBecause ? { summary: result.stoppedBecause } : {}),
+      at: Date.now(),
+    })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    broadcast({ type: 'convStatus', text: `出错：${message}`, at: Date.now() })
+    broadcast({ type: 'convDone', steps: conversation.lastSteps, summary: message, at: Date.now() })
+  } finally {
+    conversation.running = false
+    conversation.pending = null
+    conversation.abort = null
+    broadcast({ type: 'stateChanged' })
+    await chromeDeps.closeTab(ownTab)
+  }
+}
+
+/**
+ * Trims the in-memory wire history so a long conversation does not grow without
+ * bound.
+ *
+ * The history is a flat list of user/assistant/tool messages. We keep the most
+ * recent messages up to a character budget, always starting at a user turn so a
+ * tool result is never orphaned from its call.
+ */
+function pruneConversationHistory(): void {
+  const MAX_CHARS = 24_000
+  let total = 0
+  const kept: typeof conversation.history = []
+  for (let i = conversation.history.length - 1; i >= 0; i -= 1) {
+    const message = conversation.history[i]
+    if (!message) break
+    const size = typeof message.content === 'string' ? message.content.length : 0
+    if (total + size > MAX_CHARS) break
+    kept.unshift(message)
+    total += size
+  }
+  // Never start mid-tool-sequence: if the oldest kept message is a tool result,
+  // drop it and any leading tool/assistant fragment until a user message leads.
+  while (kept.length > 0 && kept[0]?.role !== 'user') kept.shift()
+  conversation.history = kept
 }
 
 /** Starts a run from the panel and replies as soon as it is registered. */
@@ -757,7 +1044,7 @@ async function startAndReply(options: {
 
 /** Assembles everything the panel renders, in one read. */
 async function buildState(): Promise<PanelState> {
-  const [cases, scripts, runs, schedules, settings, secrets, logs] = await Promise.all([
+  const [cases, scripts, runs, schedules, settings, secrets, logs, skills] = await Promise.all([
     getCases(),
     getScripts(),
     getRuns(),
@@ -765,6 +1052,7 @@ async function buildState(): Promise<PanelState> {
     getSettings(),
     getSecrets(),
     getLogs(),
+    getSkills(),
   ])
 
   let bridge = { connected: false, url: settings.bridge.url }
@@ -786,9 +1074,11 @@ async function buildState(): Promise<PanelState> {
     // Names only: a secret value must never reach the panel, where it would sit
     // in a renderer process and in React DevTools.
     secretNames: secrets.map((secret) => secret.name),
+    skills,
     logs,
     bridge,
     activeRunIds: [...active.keys()],
+    conversationActive: conversation.running,
   }
 }
 

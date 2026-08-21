@@ -30,7 +30,7 @@ import {
   type ProviderProfile,
 } from '../lib/providers'
 import { suggestPatternForUrl, validatePattern } from '../lib/urlmatch'
-import type { FeishuConfig, NotifyPolicy, RunPolicy, RunTrigger } from '../lib/types'
+import type { FeishuConfig, NotifyPolicy, RunPolicy, RunTrigger, Skill, SkillField } from '../lib/types'
 import {
   Badge,
   Button,
@@ -49,7 +49,15 @@ import {
 } from './components'
 import type { WorkerApi } from './useWorker'
 
-type SectionKey = 'provider' | 'sites' | 'policy' | 'secrets' | 'feishu' | 'bridge' | 'data'
+type SectionKey =
+  | 'provider'
+  | 'sites'
+  | 'policy'
+  | 'skills'
+  | 'secrets'
+  | 'feishu'
+  | 'bridge'
+  | 'data'
 
 export function SettingsTab({
   worker,
@@ -68,6 +76,7 @@ export function SettingsTab({
     provider: true,
     sites: true,
     policy: false,
+    skills: false,
     secrets: false,
     feishu: false,
     bridge: false,
@@ -121,6 +130,19 @@ export function SettingsTab({
         onToggle={(next) => toggle('policy', next)}
       >
         <PolicySection worker={worker} />
+      </Section>
+
+      <Section
+        title='技能（skills）'
+        subtitle={
+          state.skills.length === 0
+            ? '可复用的操作说明与填表数据'
+            : `${state.skills.length} 个技能`
+        }
+        open={open.skills}
+        onToggle={(next) => toggle('skills', next)}
+      >
+        <SkillsSection worker={worker} />
       </Section>
 
       <Section
@@ -618,6 +640,22 @@ function PolicySection({ worker }: { worker: WorkerApi }) {
             if (Number.isInteger(value) && value >= 1) patch({ maxToolRounds: value })
           }}
         />
+      </Field>
+
+      <Field
+        label='对话助手默认确认模式'
+        hint='「对话」页里模型操作页面前是否先问你。每个对话也能临时切换。自动=不问；写操作确认=只在点击/填写等改动页面时询问；全部确认=每次工具调用都询问。'
+      >
+        <select
+          value={policy.confirmMode}
+          onChange={(event) =>
+            patch({ confirmMode: event.target.value as typeof policy.confirmMode })
+          }
+        >
+          <option value='auto'>自动（不确认）</option>
+          <option value='write'>写操作确认</option>
+          <option value='always'>全部确认</option>
+        </select>
       </Field>
 
       <Toggle
@@ -1149,5 +1187,243 @@ function DataSection({ worker }: { worker: WorkerApi }) {
         />
       </div>
     </>
+  )
+}
+
+// --- 7. Skills --------------------------------------------------------------
+
+const EMPTY_SKILL: Omit<Skill, 'id' | 'createdAt' | 'updatedAt'> = {
+  name: '',
+  description: '',
+  instructions: '',
+  autoMatch: true,
+  fields: [],
+}
+
+/**
+ * Skills are reusable instruction packs plus optional fillable field data. Unlike
+ * secrets, they are fully readable here: a skill's non-secret field values are
+ * meant to be edited, and secret-bearing fields only reference a secret by name.
+ */
+function SkillsSection({ worker }: { worker: WorkerApi }) {
+  const { state, call } = worker
+  const [editing, setEditing] = useState<Skill | (Omit<Skill, 'id' | 'createdAt' | 'updatedAt'> & { id?: string }) | null>(
+    null,
+  )
+  const saving = usePending()
+  const toast = useToast()
+
+  const startNew = () => setEditing({ ...EMPTY_SKILL })
+
+  const persist = async () => {
+    if (!editing) return
+    const name = editing.name.trim()
+    if (!name) {
+      toast.error('请填写技能名称。')
+      return
+    }
+    const now = Date.now()
+    const skill: Skill = editing.id
+      ? {
+          ...(editing as Skill),
+          name,
+          description: editing.description.trim(),
+          instructions: editing.instructions.trim(),
+          updatedAt: now,
+        }
+      : {
+          id: `skill_${now.toString(36)}${Math.random().toString(36).slice(2, 8)}`,
+          name,
+          description: editing.description.trim(),
+          instructions: editing.instructions.trim(),
+          autoMatch: editing.autoMatch,
+          fields: editing.fields,
+          createdAt: now,
+          updatedAt: now,
+        }
+    try {
+      await saving.run(async () => {
+        await call({ type: 'saveSkill', skill })
+      })
+      setEditing(null)
+      toast.success('已保存技能。')
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  const setField = (patch: Partial<typeof editing>) =>
+    setEditing((current) => (current ? { ...current, ...patch } : current))
+
+  const updateSkillField = (index: number, patch: Partial<SkillField>) =>
+    setEditing((current) => {
+      if (!current) return current
+      const fields = current.fields.map((field, i) => (i === index ? { ...field, ...patch } : field))
+      return { ...current, fields }
+    })
+
+  const addField = () =>
+    setEditing((current) =>
+      current ? { ...current, fields: [...current.fields, { label: '' }] } : current,
+    )
+
+  const removeField = (index: number) =>
+    setEditing((current) =>
+      current ? { ...current, fields: current.fields.filter((_, i) => i !== index) } : current,
+    )
+
+  if (editing) {
+    return (
+      <div className='stack'>
+        <Field label='名称'>
+          <input
+            type='text'
+            value={editing.name}
+            placeholder='例如：登录信息、收货地址'
+            onChange={(event) => setField({ name: event.target.value })}
+          />
+        </Field>
+        <Field label='一句话描述' hint='会在技能列表与自动匹配提示里显示。'>
+          <input
+            type='text'
+            value={editing.description}
+            placeholder='这个技能用来做什么'
+            onChange={(event) => setField({ description: event.target.value })}
+          />
+        </Field>
+        <Field
+          label='操作说明（instructions）'
+          hint='告诉模型使用这个技能时怎么做、按什么顺序填写。支持多行。'
+        >
+          <textarea
+            rows={6}
+            value={editing.instructions}
+            placeholder={'例如：\n1. 先点击右上角登录\n2. 用下面的账号与密码填写\n3. 点击提交'}
+            onChange={(event) => setField({ instructions: event.target.value })}
+          />
+        </Field>
+        <Toggle
+          label='自动出现在可选技能列表'
+          hint='开启后，对话页可以直接挑选；关闭则只能在明确选用时加载。'
+          checked={editing.autoMatch}
+          onChange={(value) => setField({ autoMatch: value })}
+        />
+
+        <div className='stack'>
+          <span className='field__label'>填表字段（可选）</span>
+          <span className='faint small'>
+            为表单里的每个字段给一个匹配标签（label）。值可以直接写，也可以引用「密钥」里的名称——后者只传引用，真实值不进模型。
+          </span>
+          {editing.fields.map((field, index) => (
+            <div className='row row--wrap' key={index}>
+              <input
+                type='text'
+                placeholder='字段标签，如 用户名 / 邮箱'
+                value={field.label}
+                onChange={(event) => updateSkillField(index, { label: event.target.value })}
+              />
+              <select
+                value={field.secretRef ? '__secret__' : field.value !== undefined ? '__value__' : ''}
+                onChange={(event) => {
+                  if (event.target.value === '__secret__') {
+                    updateSkillField(index, { value: undefined, secretRef: state.secretNames[0] ?? '' })
+                  } else if (event.target.value === '__value__') {
+                    updateSkillField(index, { secretRef: undefined, value: '' })
+                  } else {
+                    updateSkillField(index, { value: undefined, secretRef: undefined })
+                  }
+                }}
+              >
+                <option value=''>不填值（仅说明）</option>
+                <option value='__value__'>直接写值</option>
+                <option value='__secret__'>引用密钥</option>
+              </select>
+              {field.secretRef !== undefined ? (
+                state.secretNames.length > 0 ? (
+                  <select
+                    value={field.secretRef}
+                    onChange={(event) => updateSkillField(index, { secretRef: event.target.value })}
+                  >
+                    {state.secretNames.map((name) => (
+                      <option key={name} value={name}>
+                        {name}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <span className='faint small'>还没有密钥，先去「密钥」添加。</span>
+                )
+              ) : null}
+              {field.value !== undefined ? (
+                <input
+                  type='text'
+                  placeholder='要填入的值'
+                  value={field.value}
+                  onChange={(event) => updateSkillField(index, { value: event.target.value })}
+                />
+              ) : null}
+              <Button small variant='ghost' onClick={() => removeField(index)}>
+                删除
+              </Button>
+            </div>
+          ))}
+          <div>
+            <Button small onClick={addField}>
+              + 添加字段
+            </Button>
+          </div>
+        </div>
+
+        <div className='row'>
+          <Button small variant='primary' pending={saving.pending} onClick={() => void persist()}>
+            保存
+          </Button>
+          <Button small variant='ghost' onClick={() => setEditing(null)}>
+            取消
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className='stack'>
+      <span className='faint small'>
+        技能是「操作说明 + 可填表数据」的组合。在「对话」页选中一个技能后，模型会按其中的说明操作页面，
+        并把字段值（或密钥引用）填进匹配的表单。
+      </span>
+      {state.skills.length === 0 ? (
+        <Empty title='还没有技能' hint='新建一个，把常做的操作和常用填表数据沉淀下来。' />
+      ) : (
+        state.skills.map((skill) => (
+          <div className='list__item' key={skill.id}>
+            <div className='list__text'>
+              <div className='row'>
+                <strong>{skill.name}</strong>
+                {skill.autoMatch ? <Badge tone='ok'>可选</Badge> : <Badge>隐藏</Badge>}
+                {skill.fields.length > 0 ? <Badge tone='info'>{skill.fields.length} 字段</Badge> : null}
+              </div>
+              {skill.description ? <div className='faint small'>{skill.description}</div> : null}
+            </div>
+            <Button small onClick={() => setEditing(skill)}>
+              编辑
+            </Button>
+            <ConfirmAction
+              label='删除'
+              question={`删除技能「${skill.name}」？`}
+              confirmLabel='删除'
+              onConfirm={async () => {
+                await call({ type: 'deleteSkill', skillId: skill.id })
+              }}
+            />
+          </div>
+        ))
+      )}
+      <div>
+        <Button small variant='primary' onClick={startNew}>
+          + 新建技能
+        </Button>
+      </div>
+    </div>
   )
 }

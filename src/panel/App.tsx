@@ -26,6 +26,7 @@ import { useCallback, useState } from 'react'
 import { CancelButton } from './CancelButton'
 import { CasesTab } from './CasesTab'
 import { ChatTab } from './ChatTab'
+import { CopilotTab } from './CopilotTab'
 import { RunsTab } from './RunsTab'
 import { ScriptsTab } from './ScriptsTab'
 import { SchedulesTab } from './SchedulesTab'
@@ -33,10 +34,11 @@ import { SettingsTab } from './SettingsTab'
 import { Badge, Button, Notice, ToastProvider } from './components'
 import { useWorker } from './useWorker'
 
-type TabKey = 'chat' | 'cases' | 'scripts' | 'runs' | 'schedules' | 'settings'
+type TabKey = 'copilot' | 'chat' | 'cases' | 'scripts' | 'runs' | 'schedules' | 'settings'
 
 const TABS: { key: TabKey; label: string }[] = [
-  { key: 'chat', label: '对话' },
+  { key: 'copilot', label: '对话' },
+  { key: 'chat', label: '用例编写' },
   { key: 'cases', label: '用例' },
   { key: 'scripts', label: '脚本' },
   { key: 'runs', label: '运行' },
@@ -54,7 +56,7 @@ export function App() {
 
 function Shell() {
   const worker = useWorker()
-  const [tab, setTab] = useState<TabKey>('chat')
+  const [tab, setTab] = useState<TabKey>('copilot')
   const [focusCaseId, setFocusCaseId] = useState<string | null>(null)
   const [focusRunId, setFocusRunId] = useState<string | null>(null)
   const [highlightSites, setHighlightSites] = useState(false)
@@ -78,6 +80,7 @@ function Shell() {
   const activeCount = state.activeRunIds.length
 
   const counts: Record<TabKey, number> = {
+    copilot: 0,
     chat: 0,
     cases: state.cases.length,
     scripts: state.scripts.length,
@@ -159,6 +162,7 @@ function Shell() {
           </div>
         ) : (
           <div className='app__pane' role='tabpanel'>
+            {tab === 'copilot' ? <CopilotTab worker={worker} /> : null}
             {tab === 'chat' ? (
               <ChatTab worker={worker} onOpenCase={openCase} onOpenRun={openRun} />
             ) : null}

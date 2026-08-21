@@ -438,6 +438,56 @@ describe('export and import', () => {
   })
 })
 
+describe('skills', () => {
+  function skill(overrides: Partial<import('../src/lib/types').Skill> = {}) {
+    const now = Date.now()
+    return {
+      id: 'skill_1',
+      name: '登录信息',
+      description: '填写登录',
+      instructions: '先账号后密码',
+      autoMatch: true,
+      fields: [{ label: '账号', value: 'alice' }],
+      createdAt: now,
+      updatedAt: now,
+      ...overrides,
+    }
+  }
+
+  it('saves and lists a skill', async () => {
+    await mod.saveSkill(skill())
+    const all = await mod.getSkills()
+    expect(all).toHaveLength(1)
+    expect(all[0]?.name).toBe('登录信息')
+  })
+
+  it('updates in place by id and stamps updatedAt', async () => {
+    const original = skill({ createdAt: 1000, updatedAt: 1000 })
+    await mod.saveSkill(original)
+    await mod.saveSkill(skill({ createdAt: 1000, updatedAt: 1000, description: '已更新' }))
+    const all = await mod.getSkills()
+    expect(all).toHaveLength(1)
+    expect(all[0]?.description).toBe('已更新')
+    expect(all[0]?.createdAt).toBe(1000)
+    expect(all[0]?.updatedAt).toBeGreaterThan(1000)
+  })
+
+  it('finds a skill by name case-insensitively', async () => {
+    await mod.saveSkill(skill({ name: 'My Skill' }))
+    expect(await mod.findSkillByName('  my skill ')).toBeDefined()
+    expect(await mod.findSkillByName('other')).toBeUndefined()
+  })
+
+  it('deletes by id', async () => {
+    await mod.saveSkill(skill({ id: 'a' }))
+    await mod.saveSkill(skill({ id: 'b', name: '另一个' }))
+    await mod.deleteSkill('a')
+    const all = await mod.getSkills()
+    expect(all).toHaveLength(1)
+    expect(all[0]?.id).toBe('b')
+  })
+})
+
 describe('newId', () => {
   it('prefixes and does not repeat', async () => {
     const ids = new Set(Array.from({ length: 200 }, () => mod.newId('run')))

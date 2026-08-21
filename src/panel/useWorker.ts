@@ -40,9 +40,11 @@ const EMPTY_STATE: PanelState = {
   schedules: [],
   settings: DEFAULT_SETTINGS,
   secretNames: [],
+  skills: [],
   logs: [],
   bridge: { connected: false, url: DEFAULT_SETTINGS.bridge.url },
   activeRunIds: [],
+  conversationActive: false,
 }
 
 /** A `WorkerEvent` handler, registered by a component that wants the stream. */
@@ -136,13 +138,19 @@ export function useWorker(): WorkerApi {
         case 'runStatus':
         case 'bridgeStatus':
         case 'log':
+        case 'convDone':
+        case 'convCleared':
           scheduleRefresh()
           break
         case 'runStep':
         case 'assistantText':
         case 'toolCall':
-          // Pure progress: whoever is showing the run already got it above, and
-          // a refresh per token or per step would thrash every list in the panel.
+        case 'convUser':
+        case 'convAssistant':
+        case 'convStatus':
+        case 'convTool':
+        case 'convPending':
+          // Pure progress: whoever is showing the turn already got it above.
           break
       }
     }
@@ -187,6 +195,13 @@ function isWorkerEvent(message: unknown): message is WorkerEvent {
     type === 'toolCall' ||
     type === 'stateChanged' ||
     type === 'bridgeStatus' ||
-    type === 'log'
+    type === 'log' ||
+    type === 'convUser' ||
+    type === 'convAssistant' ||
+    type === 'convStatus' ||
+    type === 'convTool' ||
+    type === 'convPending' ||
+    type === 'convDone' ||
+    type === 'convCleared'
   )
 }

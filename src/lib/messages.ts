@@ -17,12 +17,15 @@ import type { ArtifactMeta } from './artifacts'
 import type { ProviderProfile } from './providers'
 import type {
   CaseSource,
+  ConfirmMode,
   LogEntry,
   RunStatus,
   RunTranscript,
   ScheduleEntry,
   SecretEntry,
   Settings,
+  Skill,
+  ScriptStep,
   StepRecord,
   TestCase,
   TestRun,
@@ -74,6 +77,22 @@ export type PanelRequest =
   | { type: 'importAll'; json: string }
   | { type: 'clearLogs' }
   | { type: 'getStorageUsage' }
+  // --- Open-ended conversation -------------------------------------------
+  | { type: 'converse'; message: string; skillId?: string | null; confirmMode?: ConfirmMode }
+  | { type: 'cancelConversation' }
+  | { type: 'approveAction'; pendingId: string; approved: boolean }
+  | { type: 'clearConversation' }
+  | { type: 'listSkills' }
+  | { type: 'saveSkill'; skill: Skill }
+  | { type: 'deleteSkill'; skillId: string }
+  /** Saves selected recorded steps from the last conversation turn as a script. */
+  | {
+      type: 'saveConversationScript'
+      name: string
+      startUrl: string
+      /** Indices into the last turn's recorded steps; empty means all. */
+      indices?: number[]
+    }
 
 /** Everything the panel renders, fetched in one round trip. */
 export interface PanelState {
@@ -84,10 +103,14 @@ export interface PanelState {
   settings: Settings
   /** Names only: values never leave the worker. */
   secretNames: string[]
+  /** Skills available to the conversation, names and instructions only. */
+  skills: Skill[]
   logs: LogEntry[]
   bridge: { connected: boolean; url: string; lastError?: string }
   /** Runs currently executing, so the panel can show a stop button. */
   activeRunIds: string[]
+  /** True while the open-ended conversation agent is running. */
+  conversationActive: boolean
 }
 
 /** Worker → panel reply. Discriminated by the request that produced it. */
@@ -149,6 +172,37 @@ export type WorkerEvent =
   | { type: 'stateChanged' }
   | { type: 'bridgeStatus'; connected: boolean; error?: string }
   | { type: 'log'; entry: LogEntry }
+  // --- Open-ended conversation ------------------------------------------
+  /** A user message was accepted and the turn started. */
+  | { type: 'convUser'; text: string; at: number }
+  /** Accumulated assistant text; `text` is the full bubble so far. */
+  | { type: 'convAssistant'; text: string; at: number }
+  /** A coarse status line ("正在思考…", "click …"). */
+  | { type: 'convStatus'; text: string; at: number }
+  /** A tool call happened (approved or auto-run). */
+  | {
+      type: 'convTool'
+      id: string
+      name: string
+      args: string
+      result: string
+      ok: boolean
+      durationMs: number
+      declined?: boolean
+      at: number
+    }
+  /** A tool call is waiting for approve/decline. */
+  | {
+      type: 'convPending'
+      pendingId: string
+      name: string
+      args: string
+      mutating: boolean
+      at: number
+    }
+  /** The turn finished. `steps` are recorded, for the save-as-script UI. */
+  | { type: 'convDone'; steps: ScriptStep[]; summary?: string; at: number }
+  | { type: 'convCleared'; at: number }
 
 /**
  * Sends a request to the worker.

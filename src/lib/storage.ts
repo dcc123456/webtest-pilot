@@ -27,6 +27,7 @@ import type {
   ScheduleEntry,
   SecretEntry,
   Settings,
+  Skill,
   TestCase,
   TestRun,
   TestScript,
@@ -41,6 +42,7 @@ const KEYS = {
   settings: 'wtp.settings',
   logs: 'wtp.logs',
   secrets: 'wtp.secrets',
+  skills: 'wtp.skills',
 } as const
 
 /** Retention caps. Chosen so a busy month of nightly runs still fits the quota. */
@@ -159,6 +161,47 @@ export function deleteSecret(name: string): Promise<SecretEntry[]> {
     await writeKey(KEYS.secrets, next)
     return next
   })
+}
+
+// --- Skills -----------------------------------------------------------------
+
+/**
+ * Reusable instruction packs with optional fillable field data.
+ *
+ * Like secrets, skills are user-authored and small; unlike them they are not
+ * credentials, so the full record is safe to keep in a normal list key.
+ */
+export function getSkills(): Promise<Skill[]> {
+  return readKey<Skill[]>(KEYS.skills, [])
+}
+
+export async function getSkill(id: string): Promise<Skill | undefined> {
+  return (await getSkills()).find((skill) => skill.id === id)
+}
+
+export function saveSkill(skill: Skill): Promise<Skill[]> {
+  return enqueue(async () => {
+    const all = await getSkills()
+    const index = all.findIndex((existing) => existing.id === skill.id)
+    const stamped: Skill = { ...skill, updatedAt: Date.now() }
+    const next = index >= 0 ? all.with(index, stamped) : [stamped, ...all]
+    await writeKey(KEYS.skills, next)
+    return next
+  })
+}
+
+export function deleteSkill(id: string): Promise<Skill[]> {
+  return enqueue(async () => {
+    const next = (await getSkills()).filter((skill) => skill.id !== id)
+    await writeKey(KEYS.skills, next)
+    return next
+  })
+}
+
+/** Finds a skill by its unique name, used when the model calls `use_skill`. */
+export async function findSkillByName(name: string): Promise<Skill | undefined> {
+  const needle = name.trim().toLowerCase()
+  return (await getSkills()).find((skill) => skill.name.toLowerCase() === needle)
 }
 
 /** Builds the resolver the runner uses, so secrets never cross a message port. */

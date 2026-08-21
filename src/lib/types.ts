@@ -473,6 +473,15 @@ export interface RunPolicy {
    * script maintenance can turn it on, and still see the status in reports.
    */
   treatRecoveredAsPass: boolean
+  /**
+   * Default consent mode for the open-ended conversation tab.
+   *
+   * `write` is the default because a conversational agent acts on the user's real,
+   * logged-in page — auto-running every click would let a confused model submit
+   * forms unprompted, while confirming reads and scrolls adds friction without
+   * protecting anything that leaves the machine.
+   */
+  confirmMode: ConfirmMode
 }
 
 export interface Settings {
@@ -517,6 +526,7 @@ export const DEFAULT_SETTINGS: Settings = {
     autoSaveScript: true,
     resumeOnFailure: ['manual'],
     treatRecoveredAsPass: false,
+    confirmMode: 'write',
   },
   feishu: {
     webhookUrl: '',
@@ -545,4 +555,91 @@ export interface ChatMessage {
   content: string
   /** Present on tool messages, for display. */
   toolName?: string
+}
+
+// --- Conversational agent (the "对话" tab) ----------------------------------
+
+/**
+ * A reusable instruction pack plus optional fillable data.
+ *
+ * Distinct from a {@link SecretEntry} (which holds a credential value the model
+ * never sees) and from a {@link TestCase} (which is a verifiable expectation). A
+ * skill is "when doing this kind of task, follow these instructions and use these
+ * field values" — for example "fill the checkout form" with a mapping of field
+ * labels to values. Values that are secrets are referenced by name via
+ * {@link SkillField.secretRef}, so the file itself never stores the credential.
+ *
+ * The word is borrowed from browser-copilot, whose skills are pure instruction
+ * packs. That model is extended here with field data because this extension can
+ * actually operate the page, and "fill this form using my details" is the common
+ * case an instruction alone cannot serve.
+ */
+export interface Skill {
+  id: string
+  /** Unique, human-chosen name; also how the agent refers to it. */
+  name: string
+  /** One line stating when the skill applies. Drives automatic matching. */
+  description: string
+  /** Instruction text appended to the system prompt while active. */
+  instructions: string
+  /** Whether the agent may select this skill on its own (via `use_skill`). */
+  autoMatch: boolean
+  /**
+   * Field values the agent may fill. The agent matches each {@link SkillField}
+   * to a form control by label/placeholder/name; credentials go through
+   * `secretRef` rather than being stored here.
+   */
+  fields: SkillField[]
+  createdAt: number
+  updatedAt: number
+}
+
+/** One fillable field in a {@link Skill}. */
+export interface SkillField {
+  /**
+   * What the agent should match the control against — a label, placeholder, or
+   * input name. Free text because real forms are inconsistent; the model does
+   * the matching, not an exact string compare.
+   */
+  label: string
+  /** Literal value, or undefined when `secretRef` is set. */
+  value?: string
+  /** Name of a secret to use instead of a literal value. */
+  secretRef?: string
+}
+
+/** How the agent asks for consent before touching the page. */
+export type ConfirmMode =
+  /** The agent acts without prompting; fastest, least safe. */
+  | 'auto'
+  /** Only page-mutating actions (click, fill, select, checkbox, press) prompt. */
+  | 'write'
+  /** Every tool call prompts, including reads and scrolls. Safest. */
+  | 'always'
+
+/** One message in an open-ended conversation. */
+export interface ConversationTurn {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+  /** When the message was started. */
+  at: number
+}
+
+/**
+ * A page action the model proposed during a conversation, paused for approval.
+ *
+ * Unlike a {@link StepRecord} (which records something that already happened), a
+ * pending action may be declined, so it carries the raw call and a resolvable
+ * decision the loop waits on.
+ */
+export interface PendingAction {
+  id: string
+  /** Tool name, e.g. `click`, `fill`, `snapshot`. */
+  name: string
+  /** Human-readable summary of the arguments, never the post-substitution secret. */
+  argsSummary: string
+  /** Whether this action mutates the page, drives the confirm-mode decision. */
+  mutating: boolean
+  at: number
 }
