@@ -904,6 +904,89 @@ textarea.mono {
   border-color: var(--accent);
 }
 
+/* Bottom control row: mode switch on the left, send/stop on the right. */
+.chat__composer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.chat__composer-left,
+.chat__composer-right {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.confirm-select {
+  display: inline-flex;
+  align-items: center;
+}
+
+.confirm-select select {
+  padding: 3px 6px;
+  font-size: 12px;
+}
+
+/*
+  Question-mark help icon with a hover/focus tooltip. The text comes from the
+  element's data-hint so the label and its explanation can never drift.
+*/
+.help-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: help;
+  position: relative;
+}
+
+.help-icon:hover,
+.help-icon:focus-visible {
+  border-color: var(--accent);
+  color: var(--accent);
+  outline: none;
+}
+
+.help-icon::after {
+  content: attr(data-hint);
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  width: max-content;
+  max-width: 260px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--bg-sunken);
+  color: var(--text);
+  border: 1px solid var(--border);
+  font-size: 11.5px;
+  font-weight: 400;
+  line-height: 1.35;
+  white-space: normal;
+  text-align: left;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(2px);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+  z-index: 30;
+}
+
+.help-icon:hover::after,
+.help-icon:focus-visible::after {
+  opacity: 1;
+  transform: translateY(0);
+}
+
 /*
   Chat bubbles, modelled on a messenger layout: user text sits right-aligned as a
   compact accent bubble, assistant text is a plain left-aligned panel bubble, and
@@ -1286,24 +1369,6 @@ textarea.mono {
 
 .chat__step:hover {
   background: var(--bg);
-}
-
-/* Confirm-mode dropdown + live description in the composer. */
-.confirm-select {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.confirm-select select {
-  padding: 2px 6px;
-  font-size: 12px;
-}
-
-.confirm-hint {
-  display: block;
-  line-height: 1.35;
-  padding: 0 2px;
 }
 
 /* A tool call that is waiting for the user to approve or decline. */

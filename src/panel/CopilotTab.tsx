@@ -449,30 +449,10 @@ export function CopilotTab({ worker }: { worker: WorkerApi }) {
             </select>
           ) : null}
           <span className='spacer' />
-          <label className='confirm-select' title={CONFIRM_MODES.find((m) => m.value === confirmMode)?.hint}>
-            <span className='faint small'>确认</span>
-            <select
-              value={confirmMode}
-              onChange={(event) => setConfirmMode(event.target.value as ConfirmMode)}
-            >
-              {CONFIRM_MODES.map((mode) => (
-                <option key={mode.value} value={mode.value} title={mode.hint}>
-                  {mode.label}
-                </option>
-              ))}
-            </select>
-          </label>
-        </div>
-
-        {pendingId ? (
-          <div className='row'>
+          {pendingId ? (
             <span className='faint small'>等待你确认上方的操作…</span>
-          </div>
-        ) : (
-          <span className='confirm-hint faint small'>
-            {CONFIRM_MODES.find((mode) => mode.value === confirmMode)?.hint}
-          </span>
-        )}
+          ) : null}
+        </div>
 
         <textarea
           rows={3}
@@ -486,26 +466,61 @@ export function CopilotTab({ worker }: { worker: WorkerApi }) {
             }
           }}
         />
-        <div className='row'>
-          <Button small variant='ghost' onClick={() => void call({ type: 'clearConversation' })}>
-            清空
-          </Button>
-          <span className='spacer' />
-          {state.conversationActive ? (
-            <Button small onClick={cancel}>
-              停止
-            </Button>
-          ) : (
-            <Button
-              small
-              variant='primary'
-              disabled={draft.trim().length === 0}
-              pending={sending.pending}
-              onClick={send}
+        <div className='chat__composer-row'>
+          <span className='chat__composer-left'>
+            <label
+              className='confirm-select'
+              title={CONFIRM_MODES.find((m) => m.value === confirmMode)?.hint}
             >
-              发送
-            </Button>
-          )}
+              <select
+                value={confirmMode}
+                onChange={(event) => setConfirmMode(event.target.value as ConfirmMode)}
+                aria-label='确认模式'
+              >
+                {CONFIRM_MODES.map((mode) => (
+                  <option key={mode.value} value={mode.value} title={mode.hint}>
+                    {mode.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <span
+              className='help-icon'
+              tabIndex={0}
+              aria-label='确认模式说明'
+              // The hint text lives in CSS ::after so it is not duplicated here.
+              data-hint={CONFIRM_MODES.find((mode) => mode.value === confirmMode)?.hint}
+            >
+              ?
+            </span>
+          </span>
+
+          <span className='chat__composer-right'>
+            {entries.length > 0 && !state.conversationActive ? (
+              <Button
+                small
+                variant='ghost'
+                onClick={() => void call({ type: 'clearConversation' })}
+              >
+                新对话
+              </Button>
+            ) : null}
+            {state.conversationActive ? (
+              <Button small onClick={cancel}>
+                停止
+              </Button>
+            ) : (
+              <Button
+                small
+                variant='primary'
+                disabled={draft.trim().length === 0}
+                pending={sending.pending}
+                onClick={send}
+              >
+                发送
+              </Button>
+            )}
+          </span>
         </div>
       </div>
     </div>
