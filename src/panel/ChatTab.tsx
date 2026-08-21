@@ -20,7 +20,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { is } from '../lib/messages'
+import { formatDuration } from '../lib/time'
 import type { TestCase } from '../lib/types'
+import { CancelButton } from './CancelButton'
 import {
   Badge,
   Button,
@@ -35,20 +37,18 @@ import {
 import type { WorkerApi } from './useWorker'
 
 /** One transcript entry. A discriminated union so rendering cannot mix them up. */
-type Entry =
-  | { kind: 'user'; id: string; text: string }
-  | { kind: 'assistant'; id: string; runId: string; text: string }
-  | { kind: 'tool'; id: string; runId: string; name: string; summary: string }
-  | { kind: 'system'; id: string; text: string; tone: 'info' | 'error' }
-  | { kind: 'cases'; id: string; caseIds: string[] }
-  | { kind: 'run'; id: string; runId: string }
-
-let entrySeq = 0
-
-function nextEntryId(): string {
-  entrySeq += 1
-  return `e${entrySeq}`
-}
+import {
+  addEntry,
+  applyAssistantText,
+  applyPhase,
+  applyStatus,
+  applyToolCall,
+  clearChat,
+  getChatEntries,
+  mergeTranscript,
+  subscribeChat,
+  type Entry,
+} from './chatStore'
 
 export function ChatTab({
   worker,
@@ -61,7 +61,14 @@ export function ChatTab({
   /** Jumps to the Runs tab focused on one run, for the step list and screenshots. */
   onOpenRun: (runId: string) => void
 }) {
-  const [entries, setEntries] = useState<Entry[]>([])
+  /**
+   * Mirrors the module-level store rather than owning the transcript.
+   *
+   * The tab is unmounted whenever the user switches tabs, so state held here would
+   * be destroyed along with every event that arrived while it was away. The store
+   * outlives the component; this is just a subscription to it.
+   */
+  const [entries, setEntries] = useState<Entry[]>(getChatEntries)
   const [draft, setDraft] = useState('')
   const [showTools, setShowTools] = useState(true)
   const [openTools, setOpenTools] = useState<Record<string, boolean>>({})
@@ -72,62 +79,72 @@ export function ChatTab({
 
   const { call, subscribe, state } = worker
 
-  const append = useCallback((entry: Entry) => {
-    setEntries((current) => [...current, entry])
-  }, [])
+  useEffect(() => subscribeChat(setEntries), [])
 
   /**
-   * Streaming assistant text is merged into the trailing entry for its run.
+   * Live run events, recorded into the store.
    *
-   * Appending one entry per delta would produce hundreds of bubbles per run; the
-   * check for "trailing" matters because a tool call in between must break the
-   * text into a new bubble, or the transcript would show the agent's reasoning
-   * out of order relative to its actions.
+   * These are a fast path, not the source of truth: every one of them was already
+   * written to the worker's transcript, and each carries the sequence number it was
+   * stored under. That is what makes the rehydration below idempotent.
    */
   useEffect(() => {
     const unsubscribe = subscribe((event) => {
       switch (event.type) {
-        case 'assistantText': {
-          setEntries((current) => {
-            const last = current[current.length - 1]
-            if (last && last.kind === 'assistant' && last.runId === event.runId) {
-              return current.with(current.length - 1, { ...last, text: last.text + event.delta })
-            }
-            return [
-              ...current,
-              { kind: 'assistant', id: nextEntryId(), runId: event.runId, text: event.delta },
-            ]
+        case 'assistantText':
+          applyAssistantText(event.runId, event.seq, event.text)
+          break
+        case 'toolCall':
+          applyToolCall(event.runId, event.seq, {
+            name: event.name,
+            args: event.args,
+            result: event.result,
+            ok: event.ok,
+            durationMs: event.durationMs,
+            round: event.round,
           })
           break
-        }
-        case 'toolCall':
-          append({
-            kind: 'tool',
-            id: nextEntryId(),
-            runId: event.runId,
-            name: event.name,
-            summary: event.summary,
-          })
+        case 'runPhase':
+          applyPhase(event.runId, event.seq, event.text)
           break
         case 'runStatus':
           // Only terminal transitions are narrated: "running" is already visible
           // from the run entry's own badge, and echoing it would add noise.
           if (event.status === 'running' || event.status === 'queued') break
-          append({
-            kind: 'system',
-            id: nextEntryId(),
-            tone: event.status === 'passed' ? 'info' : 'error',
-            text: event.message
-              ? `运行结束：${event.status} — ${event.message}`
-              : `运行结束：${event.status}`,
-          })
+          applyStatus(event.runId, event.seq, event.status, event.message)
           break
         default:
           break
       }
     })
     return unsubscribe
-  }, [append, subscribe])
+  }, [subscribe])
+
+  /**
+   * Refills anything that happened while this tab was unmounted.
+   *
+   * This is the actual fix for "I switched to another tab and my transcript was
+   * gone". Events are delivered only to a live listener, so a run that progressed
+   * while the user was on the Cases tab left no trace in the panel. The worker kept
+   * recording, so on mount we merge its version back in — keyed by `runId` + `seq`,
+   * so entries already present are updated rather than duplicated.
+   */
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const response = await call({ type: 'getTranscripts' })
+        if (cancelled || !is.transcripts(response)) return
+        for (const transcript of response.transcripts) mergeTranscript(transcript)
+      } catch {
+        // A missing transcript is not worth an error banner: the run itself, its
+        // steps and its screenshots are all still on the Runs tab.
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [call])
 
   /** Follows the tail while new content arrives, which is what a watcher wants. */
   useEffect(() => {
@@ -155,40 +172,38 @@ export function ChatTab({
     async (markdown: string, source: 'chat' | 'markdown') => {
       const text = markdown.trim()
       if (!text) return
-      append({ kind: 'user', id: nextEntryId(), text })
+      addEntry({ kind: 'user', text })
       await importing.run(async () => {
         const response = await call({ type: 'importMarkdown', markdown: text, source })
         if (!is.cases(response)) {
           throw new Error('后台没有返回解析出的用例。')
         }
-        append({
+        addEntry({
           kind: 'cases',
-          id: nextEntryId(),
           caseIds: response.cases.map((entry) => entry.id),
         })
         setDraft('')
       })
     },
-    [append, call, importing],
+    [call, importing],
   )
 
   const startRun = useCallback(
     async (caseId: string, useAgent: boolean) => {
       const response = await call({ type: 'runCase', caseId, useAgent })
       if (is.run(response)) {
-        append({ kind: 'run', id: nextEntryId(), runId: response.run.id })
+        addEntry({ kind: 'run', runId: response.run.id })
         return
       }
       // The worker replies with a message when the run started but had not
       // registered yet; that is a success, just without an id to follow.
-      append({
+      addEntry({
         kind: 'system',
-        id: nextEntryId(),
         tone: 'info',
         text: is.message(response) ? response.message : '运行已启动。',
       })
     },
-    [append, call],
+    [call],
   )
 
   const pickFile = useCallback(() => {
@@ -276,17 +291,34 @@ export function ChatTab({
                       setOpenTools((current) => ({ ...current, [entry.id]: next }))
                     }
                     summary={
-                      <span className='row'>
+                      <span className='row row--wrap'>
+                        {/* Outcome first: scanning a long run for the step that
+                            went wrong is the most common reason to read this. */}
+                        <span
+                          className={entry.ok ? 'tool-row__ok' : 'tool-row__bad'}
+                          aria-hidden='true'
+                        >
+                          {entry.ok ? '✓' : '✗'}
+                        </span>
                         <span className='tool-row__name'>{entry.name}</span>
-                        <span className='tool-row__summary'>{entry.summary}</span>
+                        <span className='tool-row__summary'>{entry.args}</span>
+                        <span className='faint small'>
+                          {formatDuration(entry.durationMs)} · 第 {entry.round} 轮
+                        </span>
                       </span>
                     }
                   >
-                    <span className='tool-row__detail'>{entry.summary}</span>
+                    <span className='tool-row__detail'>{entry.result}</span>
                   </Collapsible>
                 </div>
               )
             }
+            case 'phase':
+              return (
+                <div className='phase-row' key={entry.id}>
+                  <span className='faint small'>{entry.text}</span>
+                </div>
+              )
             case 'system':
               return (
                 <div
@@ -396,7 +428,12 @@ export function ChatTab({
             {showTools ? '隐藏工具调用' : '显示工具调用'}
           </Button>
           {entries.length > 0 ? (
-            <Button variant='ghost' small onClick={() => setEntries([])}>
+            <Button
+              variant='ghost'
+              small
+              onClick={clearChat}
+              title='只清空这里的显示；运行记录、脚本和截图都保留在「运行」标签页'
+            >
               清屏
             </Button>
           ) : null}
@@ -477,22 +514,4 @@ function ParsedCaseCard({
   )
 }
 
-function CancelButton({ runId, worker }: { runId: string; worker: WorkerApi }) {
-  const { pending, run } = usePending()
-  const toast = useToast()
-  return (
-    <Button
-      small
-      variant='danger'
-      pending={pending}
-      onClick={() =>
-        void run(async () => {
-          const response = await worker.call({ type: 'cancelRun', runId })
-          toast.info(is.message(response) ? response.message : '已请求取消。')
-        })
-      }
-    >
-      取消
-    </Button>
-  )
-}
+

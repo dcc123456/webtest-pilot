@@ -27,8 +27,11 @@ import { runOp } from '../inpage/kernel'
 import type { Op, OpResult, PageSnapshot } from '../lib/ops'
 import { checkUrlAllowed, isAutomatableUrl } from '../lib/urlmatch'
 import {
+  CancelledError,
   DriverError,
   NotAllowedError,
+  sleepUnlessCancelled,
+  throwIfCancelled,
   type Driver,
   type DriverTab,
   type RunContext,
@@ -138,6 +141,10 @@ export class ChromeDriver implements Driver {
     const deadline = Date.now() + timeoutMs
     let sawLoading = false
     for (;;) {
+      // Cancellation is checked before the deadline: a user who pressed Cancel is
+      // not waiting for this page, and returning quietly (rather than throwing)
+      // lets the caller's own signal check produce the `cancelled` verdict.
+      if (context.signal?.aborted) return
       if (Date.now() > deadline) return // Best effort: the step's own wait decides.
       try {
         const [injection] = await chrome.scripting.executeScript({
@@ -148,7 +155,7 @@ export class ChromeDriver implements Driver {
         if (state === 'complete' || state === 'interactive') {
           // One extra tick after a load we actually observed starting, so a
           // framework's first render lands before the next step queries the DOM.
-          if (sawLoading) await sleep(POLL_INTERVAL_MS)
+          if (sawLoading) await sleepUnlessCancelled(POLL_INTERVAL_MS, context.signal)
           return
         }
         if (state === 'loading') sawLoading = true
@@ -157,7 +164,7 @@ export class ChromeDriver implements Driver {
         // Mid-navigation the frame does not exist yet; keep waiting.
         if (!isContextLost(message)) throw new DriverError(message)
       }
-      await sleep(POLL_INTERVAL_MS)
+      await sleepUnlessCancelled(POLL_INTERVAL_MS, context.signal)
     }
   }
 
@@ -244,11 +251,17 @@ export class ChromeDriver implements Driver {
     const deadline = Date.now() + Math.max(0, timeoutMs)
     let last: OpResult | null = null
     for (;;) {
+      // The single most important cancellation check in the codebase. This loop is
+      // where a run spends most of its wall-clock time — up to `stepTimeoutMs` per
+      // step — so without this, pressing Cancel does nothing visible for ten
+      // seconds and the button appears broken.
+      throwIfCancelled(context.signal)
       try {
         last = await this.exec(context, op)
         if (last.ok) return last
       } catch (error) {
         if (error instanceof NotAllowedError) throw error
+        if (error instanceof CancelledError) throw error
         const message = error instanceof Error ? error.message : String(error)
         if (!isContextLost(message)) {
           last = {
@@ -261,7 +274,7 @@ export class ChromeDriver implements Driver {
         }
       }
       if (Date.now() >= deadline) break
-      await sleep(POLL_INTERVAL_MS)
+      await sleepUnlessCancelled(POLL_INTERVAL_MS, context.signal)
     }
     return (
       last ?? {

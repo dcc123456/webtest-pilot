@@ -110,12 +110,17 @@ export class FakeAlarms {
 /** Installs the fakes on `globalThis.chrome` and returns them. */
 export function installChromeFake(options: FakeStorageOptions = {}): {
   storage: FakeStorage
+  session: FakeStorage
   alarms: FakeAlarms
 } {
   const storage = new FakeStorage(options)
+  // A separate instance, mirroring Chrome: `session` is cleared when the browser
+  // closes and shares no keys with `local`. One shared object would let a test pass
+  // while the real extension wrote a transcript into permanent storage.
+  const session = new FakeStorage()
   const alarms = new FakeAlarms()
   const chromeLike = {
-    storage: { local: storage },
+    storage: { local: storage, session },
     alarms,
     runtime: {
       getManifest: () => ({ version: '0.1.0' }),
@@ -124,5 +129,5 @@ export function installChromeFake(options: FakeStorageOptions = {}): {
     },
   }
   ;(globalThis as { chrome?: unknown }).chrome = chromeLike
-  return { storage, alarms }
+  return { storage, session, alarms }
 }

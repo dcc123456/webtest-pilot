@@ -9,5 +9,7 @@ Thumbs.db
 .idea/
 .vscode/
 coverage/
+# Packaged extension for manual loading; rebuilt from source, never reviewed.
+*.zip
 # Local bridge state: generated auth token, run history, screenshots.
 .webtest-pilot/

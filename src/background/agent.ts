@@ -29,7 +29,7 @@ import type { Target } from '../lib/selectors'
 import { describeTarget } from '../lib/selectors'
 import type { ActionName } from '../lib/ops'
 import type { StepRecord } from '../lib/types'
-import { NotAllowedError, type Driver, type RunContext } from './driver'
+import { CancelledError, NotAllowedError, type Driver, type RunContext } from './driver'
 import type { RecordedAction } from './recorder'
 
 /** Names the model calls. Kept short: every token is paid for on each round. */
@@ -992,6 +992,10 @@ export async function dispatchTool(
     // A policy violation must end the run: telling the model to try again would
     // invite it to look for a way around the allow-list.
     if (error instanceof NotAllowedError) throw error
+    // Cancellation must end the run for the same reason, and this clause is easy to
+    // miss: reporting it to the model as `Error running click: ...` would have the
+    // agent cheerfully try the next tool while the user waits for it to stop.
+    if (error instanceof CancelledError) throw error
     if (error instanceof ToolInputError) return { content: `Error: ${error.message}` }
     const message = error instanceof Error ? error.message : String(error)
     return { content: `Error running ${String(name)}: ${message}` }
@@ -1000,6 +1004,50 @@ export async function dispatchTool(
 
 /** Placeholder the runner swaps for the real secret before it reaches the page. */
 export const SECRET_PLACEHOLDER = '\u0000WTP_SECRET\u0000'
+
+/**
+ * A one-line, human-readable summary of a tool call's arguments.
+ *
+ * Built for the panel, which previously showed only a tool's name — leaving a user
+ * watching `fill`, `fill`, `click` with no idea what was being filled or clicked.
+ *
+ * Redaction is the load-bearing part, and it works by *allow-list*: a `secretRef`
+ * is rendered as the secret's NAME and any `value` alongside it is dropped
+ * entirely. A blocklist would be the wrong shape here — one new field carrying a
+ * credential and the transcript leaks it into `storage.session` and the panel.
+ */
+export function summarizeToolArgs(name: string, args: Record<string, unknown>): string {
+  const parts: string[] = []
+  const usesSecret = typeof args.secretRef === 'string' && args.secretRef.trim().length > 0
+
+  for (const [key, raw] of Object.entries(args)) {
+    // A secret's value never appears, in any field, under any tool.
+    if (key === 'secretRef') {
+      parts.push(`secret=${String(raw)}`)
+      continue
+    }
+    if (key === 'value' && usesSecret) {
+      parts.push('value=（密钥，已隐藏）')
+      continue
+    }
+    if (raw === undefined || raw === null || raw === '') continue
+
+    let text: string
+    if (typeof raw === 'string') text = raw
+    else if (typeof raw === 'number' || typeof raw === 'boolean') text = String(raw)
+    else text = JSON.stringify(raw)
+
+    // Long selectors and pasted text are trimmed: this is a summary line, and the
+    // full value is already in the step record.
+    if (text.length > 80) text = `${text.slice(0, 80)}…`
+    parts.push(`${key}=${text}`)
+  }
+
+  const summary = parts.join(' ')
+  // Belt and braces: if a placeholder ever reaches here, it must not be rendered as
+  // a control character in the panel.
+  return summary.split(SECRET_PLACEHOLDER).join('（密钥，已隐藏）') || name
+}
 
 /** A malformed tool call, reported to the model rather than thrown. */
 class ToolInputError extends Error {}

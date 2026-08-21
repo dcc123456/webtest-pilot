@@ -55,16 +55,30 @@ import {
   parseToolArguments,
   recoveredStatus,
   recoveryInstruction,
+  summarizeToolArgs,
   systemPrompt,
   toolSchemas,
   validateVerdict,
   type Diagnosis,
   type Verdict,
 } from './agent'
-import { NotAllowedError, type Driver, type RunContext } from './driver'
+import { CancelledError, NotAllowedError, type Driver, type RunContext } from './driver'
 import { ChromeDriver, closeRunTab, findUsableTab, openRunTab } from './driver.chrome'
 import { Recorder, suggestScriptName } from './recorder'
 import { runScript } from './runner'
+
+/** Details of one completed tool call, for the panel's live commentary. */
+export interface ToolCallReport {
+  name: string
+  /** Redacted arguments; see `summarizeToolArgs`. */
+  args: string
+  /** The tool's reply, as the model saw it. */
+  result: string
+  ok: boolean
+  durationMs: number
+  /** Which model round issued it, so a loop going nowhere is visible. */
+  round: number
+}
 
 /** How a run reports progress to whoever is watching. */
 export interface RunObserver {
@@ -73,7 +87,15 @@ export interface RunObserver {
   onStatus?: (runId: string, status: RunStatus, message?: string) => void
   /** Assistant prose during an agent run, for the chat transcript. */
   onAssistantText?: (runId: string, text: string) => void
-  onToolCall?: (runId: string, name: string, summary: string) => void
+  onToolCall?: (runId: string, report: ToolCallReport) => void
+  /**
+   * Coarse progress, for the gaps where nothing else is emitted.
+   *
+   * A model round can take twenty seconds with no output, and a page wait longer
+   * still. Without this the panel looks frozen and users conclude the run has hung
+   * — the single most common reason someone force-reloads an extension mid-test.
+   */
+  onPhase?: (runId: string, text: string) => void
 }
 
 export interface StartOptions {
@@ -180,7 +202,10 @@ export async function startRun(options: StartOptions): Promise<RunOutcome> {
     // as an extension rather than a Playwright script. The session, cookies and
     // data they already have are inherited, so nothing has to log in first.
     const opened = await openContext(startUrl, deps, policy.allowedSites)
-    context = opened.context
+    // Attached in exactly one place, right where the context is born. Every driver
+    // call receives the context, so this is what makes cancellation reach the
+    // polling loops inside `waitFor` — the only place a run spends real time.
+    context = options.signal ? { ...opened.context, signal: options.signal } : opened.context
     ownTab = opened.ownTab
 
     const driver = deps.createDriver(policy.allowedSites)
@@ -191,7 +216,12 @@ export async function startRun(options: StartOptions): Promise<RunOutcome> {
     return outcome
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    const status: RunStatus = options.signal?.aborted ? 'cancelled' : 'error'
+    // `CancelledError` is checked alongside the signal because a driver can raise it
+    // from deep inside a polling loop. Relying on the signal alone would be almost
+    // right — and would misreport a cancellation as `error` in the race where the
+    // throw wins, which is exactly the case a user sees when they cancel a slow wait.
+    const status: RunStatus =
+      options.signal?.aborted || error instanceof CancelledError ? 'cancelled' : 'error'
     const finished: TestRun = {
       ...run,
       status,
@@ -508,7 +538,10 @@ async function driveWithModel(
 
   for (let round = 0; round < maxRounds; round += 1) {
     if (options.signal?.aborted) {
-      stoppedBecause = 'cancelled'
+      // Prose, not the status word: this string becomes the run's summary, which is
+      // what the user reads in the panel and what the Feishu card quotes. A bare
+      // `cancelled` there reads like a leaked enum.
+      stoppedBecause = '运行已被取消。'
       break
     }
     if (Date.now() > deadline) {
@@ -518,6 +551,9 @@ async function driveWithModel(
 
     let text = ''
     let toolCalls: WireToolCall[] = []
+    // Announced before the call, not after: this is the longest silent gap in a run,
+    // and the whole reason for the phase channel.
+    options.observer?.onPhase?.(run.id, `正在调用模型（第 ${round + 1}/${maxRounds} 轮）…`)
     try {
       const completion = await streamCompletion(
         {
@@ -577,7 +613,14 @@ async function driveWithModel(
       // tells a human the failure is real rather than a stale selector.
       if (call.function.name === 'diagnose') {
         diagnosis = parseDiagnosis(parseToolArguments(call.function.arguments))
-        options.observer?.onToolCall?.(run.id, 'diagnose', diagnosis.diagnosis)
+        options.observer?.onToolCall?.(run.id, {
+          name: 'diagnose',
+          args: diagnosis.cause,
+          result: `${diagnosis.diagnosis}\n${diagnosis.proposal}`,
+          ok: true,
+          durationMs: Date.now() - startedAt,
+          round: round + 1,
+        })
         messages.push({
           role: 'tool',
           tool_call_id: call.id,
@@ -586,6 +629,15 @@ async function driveWithModel(
         })
         continue
       }
+
+      // Summarised before dispatch so the panel can name what is happening while it
+      // happens, and so the arguments shown are the ones the model actually sent —
+      // never the post-substitution ones that contain a real secret.
+      const argsSummary = summarizeToolArgs(
+        call.function.name,
+        parseToolArguments(call.function.arguments),
+      )
+      options.observer?.onPhase?.(run.id, `${call.function.name} ${argsSummary}`)
 
       const outcome = await dispatchTool(call, {
         driver,
@@ -640,7 +692,14 @@ async function driveWithModel(
       }
       steps.push(record)
       options.observer?.onStep?.(run.id, record)
-      options.observer?.onToolCall?.(run.id, call.function.name, outcome.content)
+      options.observer?.onToolCall?.(run.id, {
+        name: call.function.name,
+        args: argsSummary,
+        result: outcome.content,
+        ok: record.ok && record.error === undefined,
+        durationMs: record.durationMs,
+        round: round + 1,
+      })
       void patchRun(run.id, { steps: [...steps], heartbeatAt: Date.now() })
 
       messages.push({

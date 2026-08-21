@@ -905,6 +905,30 @@ textarea.mono {
   font-size: 11px;
 }
 
+/* Outcome marks on a tool row. `--fail` rather than `--err`: a tool call that did
+   not succeed is a finding about the page, not a harness malfunction. */
+.tool-row__ok {
+  color: var(--ok);
+  flex: none;
+  font-weight: 600;
+}
+
+.tool-row__bad {
+  color: var(--fail);
+  flex: none;
+  font-weight: 600;
+}
+
+/* Coarse progress, deliberately quiet: it exists so a long model round does not
+   look like a hang, not to compete with the agent's actual output. */
+.phase-row {
+  padding: 1px 7px;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 /* --- Runs ----------------------------------------------------------------- */
 
 .step {

@@ -26,6 +26,57 @@ export interface RunContext {
   tabId: number
   /** Window opened for the run, when a dedicated one was created. */
   windowId?: number
+  /**
+   * Cancellation for the run that owns this context.
+   *
+   * Carried here rather than as a parameter on every `Driver` method because it is
+   * a property of the *run*, and threading it through fourteen signatures would
+   * invite exactly one of them to forget. `RunContext` is in-memory only — never
+   * persisted, never sent over `chrome.runtime` — so a live `AbortSignal` is safe
+   * to hold in it.
+   *
+   * It exists because the slow parts of a run are polling loops, not the calls
+   * around them. Without this, `waitFor` keeps re-injecting for the full step
+   * timeout after the user has already pressed Cancel, and the button looks broken.
+   */
+  signal?: AbortSignal
+}
+
+/** Raised when a run is cancelled while a driver call is in flight. */
+export class CancelledError extends Error {
+  constructor(message = '运行已被取消。') {
+    super(message)
+    this.name = 'CancelledError'
+  }
+}
+
+/**
+ * Sleeps, but wakes early when the run is cancelled.
+ *
+ * The naive `sleep(200)` inside a polling loop is what makes cancellation feel
+ * dead: the loop checks the signal only after finishing its nap, so a user who
+ * cancels during a 10-second wait watches nothing happen. Racing the timer against
+ * the signal turns "up to a full poll interval late" into "immediately".
+ */
+export function sleepUnlessCancelled(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms))
+  if (signal.aborted) return Promise.resolve()
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    function onAbort(): void {
+      clearTimeout(timer)
+      resolve()
+    }
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+/** Throws {@link CancelledError} when the run has been cancelled. */
+export function throwIfCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new CancelledError()
 }
 
 /**

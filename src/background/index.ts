@@ -52,7 +52,17 @@ import {
   storageUsage,
 } from '../lib/storage'
 import type { ScheduleEntry, TestRun } from '../lib/types'
-import { StartError, startRun } from './orchestrator'
+import { StartError, startRun, type RunObserver, type ToolCallReport } from './orchestrator'
+import {
+  appendAssistantDelta,
+  appendEntry,
+  beginTranscript,
+  clearTranscripts,
+  deleteTranscript,
+  endTranscript,
+  getTranscript,
+  reconcileTranscripts,
+} from './transcript'
 import { TICK_ALARM, installScheduler, onTick, refreshNextRun, resyncSchedules } from './scheduler'
 
 /**
@@ -92,6 +102,12 @@ async function bootstrap(reason: string): Promise<void> {
       })
     }
     if (repaired.length > 0) broadcast({ type: 'stateChanged' })
+
+    // Same reasoning applied to the commentary: a transcript left `running` by an
+    // evicted worker would show a live spinner for a run that is already dead.
+    // `active` is empty at this point by definition — it cannot survive eviction —
+    // so every `running` transcript here is stale.
+    await reconcileTranscripts([...active.keys()])
 
     await resyncSchedules()
 
@@ -138,12 +154,23 @@ async function runScheduled(entry: ScheduleEntry): Promise<TestRun | undefined> 
   if (!testCase) return undefined
 
   const controller = new AbortController()
+  const shared = makeObserver()
   const outcome = await startRun({
     testCase,
     trigger: 'schedule',
     useAgent: !entry.preferScript,
     signal: controller.signal,
-    observer: makeObserver(),
+    observer: {
+      ...shared,
+      onRun: (run) => {
+        // Registered so a scheduled run is cancellable too. Without this the run
+        // showed up in "N running" but `cancelRun` reported it had already finished —
+        // and a schedule that hits a hanging page could only be stopped by reloading
+        // the extension.
+        active.set(run.id, controller)
+        shared.onRun?.(run)
+      },
+    },
   })
   active.delete(outcome.run.id)
   await notifyIfNeeded(outcome.run, entry.notify)
@@ -187,15 +214,105 @@ async function notifyIfNeeded(run: TestRun, policy?: ScheduleEntry['notify']): P
   }
 }
 
-/** Progress observer for unattended runs, forwarding only what a panel needs. */
-function makeObserver() {
-  // Unattended runs have no panel open most of the time; `broadcast` swallows
-  // the "no receiver" rejection, so this is safe either way.
+/**
+ * The observer every trigger uses: records to the transcript, then broadcasts.
+ *
+ * Both halves matter, and in this order. The **recording** is what survives a panel
+ * tab switch and an MV3 worker eviction — it is the source of truth, because the
+ * worker owns the run. The **broadcast** is only a fast path so an open panel
+ * updates without polling; a broadcast with no receiver is swallowed, which is the
+ * normal case for a scheduled run at 3am.
+ *
+ * Before this existed, the transcript lived in the Chat tab's React state. Switching
+ * to any other tab unmounted it, discarding everything and permanently losing the
+ * events that arrived while it was away.
+ */
+function makeObserver(): RunObserver {
   return {
-    onRun: (run: TestRun) => broadcast({ type: 'runUpdated', run }),
-    onStatus: (runId: string, status: TestRun['status'], message?: string) =>
-      broadcast({ type: 'runStatus', runId, status, ...(message ? { message } : {}) }),
+    onRun: (run: TestRun) => {
+      // Opens the transcript on the first sighting of the run, so the case name is
+      // available for a panel that attaches later.
+      void beginTranscriptOnce(run)
+      broadcast({ type: 'runUpdated', run })
+    },
+    onStep: (runId: string, step) => broadcast({ type: 'runStep', runId, step }),
+    onStatus: (runId: string, status: TestRun['status'], message?: string) => {
+      void (async () => {
+        await whenTranscriptReady(runId)
+        const stored = await appendEntry(runId, {
+          kind: 'status',
+          status,
+          ...(message ? { message } : {}),
+        })
+        if (status !== 'running' && status !== 'queued') {
+          await endTranscript(runId, status)
+          // Released on the terminal status so a long-lived worker does not keep one
+          // entry per run it has ever executed.
+          transcriptReady.delete(runId)
+        }
+        broadcast({
+          type: 'runStatus',
+          runId,
+          status,
+          ...(message ? { message } : {}),
+          ...(stored ? { seq: stored.seq } : {}),
+        })
+      })()
+    },
+    onAssistantText: (runId: string, delta: string) => {
+      // Broadcast *after* the store assigns a sequence number, and carrying the
+      // accumulated text, so a live event and a later replay describe the same entry
+      // rather than two. Ordering is guaranteed by the store's write queue.
+      void (async () => {
+        await whenTranscriptReady(runId)
+        const stored = await appendAssistantDelta(runId, delta)
+        if (stored?.kind === 'assistant') {
+          broadcast({ type: 'assistantText', runId, delta, text: stored.text, seq: stored.seq })
+        }
+      })()
+    },
+    onToolCall: (runId: string, report: ToolCallReport) => {
+      void (async () => {
+        await whenTranscriptReady(runId)
+        const stored = await appendEntry(runId, { kind: 'tool', ...report })
+        if (stored) broadcast({ type: 'toolCall', runId, seq: stored.seq, ...report })
+      })()
+    },
+    onPhase: (runId: string, text: string) => {
+      void (async () => {
+        await whenTranscriptReady(runId)
+        const stored = await appendEntry(runId, { kind: 'phase', text })
+        if (stored) broadcast({ type: 'runPhase', runId, seq: stored.seq, text })
+      })()
+    },
   }
+}
+
+/**
+ * Opens a run's transcript exactly once, and lets appenders wait for it.
+ *
+ * Keyed by run id and holding the *promise*, not a boolean, because the observer's
+ * appenders fire without awaiting: `appendEntry` returns `undefined` when no
+ * transcript exists yet, so an early `onPhase` racing `beginTranscript` would be
+ * dropped. Awaiting this first makes the ordering explicit.
+ *
+ * In memory rather than derived from storage because it only has to be right for the
+ * lifetime of a run: if the worker is evicted mid-run the run dies with it, and
+ * `reconcileTranscripts` closes the transcript on the next wake-up.
+ */
+const transcriptReady = new Map<string, Promise<void>>()
+
+function beginTranscriptOnce(run: TestRun): Promise<void> {
+  const existing = transcriptReady.get(run.id)
+  if (existing) return existing
+  const promise = beginTranscript(run.id, run.caseName)
+  transcriptReady.set(run.id, promise)
+  return promise
+}
+
+/** Resolves once the run's transcript exists, so an append cannot be dropped. */
+async function whenTranscriptReady(runId: string): Promise<void> {
+  await transcriptReady.get(runId)
 }
 
 // --- Bridge ------------------------------------------------------------------
@@ -206,6 +323,7 @@ async function connectBridge(): Promise<void> {
   await connect({
     startRun: async (params) => {
       const controller = new AbortController()
+      const shared = makeObserver()
       const testCase = params.caseId ? await getCase(params.caseId) : undefined
       const script = params.scriptId ? await getScript(params.scriptId) : undefined
       const outcome = await startRun({
@@ -214,14 +332,26 @@ async function connectBridge(): Promise<void> {
         trigger: 'bridge',
         ...(params.useAgent ? { useAgent: true } : {}),
         signal: controller.signal,
+        observer: {
+          ...shared,
+          onRun: (run) => {
+            // Without this, `cancelRun` below could never find the controller and
+            // always answered "no such run" — so a CI job could start a run over the
+            // local API but never stop it.
+            active.set(run.id, controller)
+            shared.onRun?.(run)
+          },
+        },
       })
       active.delete(outcome.run.id)
       await notifyIfNeeded(outcome.run)
       return outcome.run
     },
     cancelRun: (runId: string) => {
-      active.get(runId)?.abort()
-      return active.has(runId)
+      const controller = active.get(runId)
+      if (!controller) return false
+      controller.abort()
+      return true
     },
   })
 }
@@ -267,7 +397,20 @@ async function handlePanelRequest(request: PanelRequest): Promise<PanelResponse>
         return { ok: false, error: '该运行已经结束，无法取消。' }
       }
       controller.abort()
+      // Recorded in the transcript as well as returned, so the reason a run stopped
+      // is visible to a panel that was on another tab when it happened.
+      void appendEntry(request.runId, { kind: 'phase', text: '已请求取消，正在停止…' })
       return { ok: true, message: '已请求取消，当前步骤结束后停止。' }
+    }
+
+    case 'getTranscript': {
+      const transcript = await getTranscript(request.runId)
+      return { ok: true, transcript: transcript ?? null }
+    }
+
+    case 'getTranscripts': {
+      const { listTranscripts } = await import('./transcript')
+      return { ok: true, transcripts: await listTranscripts() }
     }
 
     case 'importMarkdown': {
@@ -327,6 +470,9 @@ async function handlePanelRequest(request: PanelRequest): Promise<PanelResponse>
       // the storage budget for evidence nobody can reach.
       await deleteRunArtifacts(request.runId)
       await deleteRun(request.runId)
+      // The transcript goes too, for the same reason: commentary about a run nobody
+      // can open is just occupied quota.
+      await deleteTranscript(request.runId)
       broadcast({ type: 'stateChanged' })
       return { ok: true }
     }
@@ -334,6 +480,7 @@ async function handlePanelRequest(request: PanelRequest): Promise<PanelResponse>
     case 'clearRuns': {
       await clearArtifacts()
       await clearRuns()
+      await clearTranscripts()
       broadcast({ type: 'stateChanged' })
       return { ok: true }
     }
@@ -510,6 +657,7 @@ async function startAndReply(options: {
   useAgent?: boolean
 }): Promise<PanelResponse> {
   const controller = new AbortController()
+  const shared = makeObserver()
   try {
     // Not awaited to completion: a run takes minutes and the panel needs its id
     // now so it can show progress. Errors surface as run status, not as a
@@ -521,15 +669,14 @@ async function startAndReply(options: {
       ...(options.useAgent ? { useAgent: true } : {}),
       signal: controller.signal,
       observer: {
+        ...shared,
         onRun: (run) => {
+          // Registered here because this is the earliest moment the run has an id.
+          // A user can press Cancel a second after starting, and an unregistered
+          // controller is exactly the "cancel does nothing" complaint.
           active.set(run.id, controller)
-          broadcast({ type: 'runUpdated', run })
+          shared.onRun?.(run)
         },
-        onStep: (runId, step) => broadcast({ type: 'runStep', runId, step }),
-        onStatus: (runId, status, message) =>
-          broadcast({ type: 'runStatus', runId, status, ...(message ? { message } : {}) }),
-        onAssistantText: (runId, delta) => broadcast({ type: 'assistantText', runId, delta }),
-        onToolCall: (runId, name, summary) => broadcast({ type: 'toolCall', runId, name, summary }),
       },
     })
 

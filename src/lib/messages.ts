@@ -19,6 +19,7 @@ import type {
   CaseSource,
   LogEntry,
   RunStatus,
+  RunTranscript,
   ScheduleEntry,
   SecretEntry,
   Settings,
@@ -34,6 +35,16 @@ export type PanelRequest =
   | { type: 'runCase'; caseId: string; useAgent?: boolean }
   | { type: 'runScript'; scriptId: string }
   | { type: 'cancelRun'; runId: string }
+  /**
+   * Fetches one run's live commentary.
+   *
+   * The panel calls this on mount rather than relying only on live events, because
+   * switching tabs unmounts the Chat tab and the events that arrived meanwhile are
+   * gone. The worker keeps the transcript, so the panel can always redraw.
+   */
+  | { type: 'getTranscript'; runId: string }
+  /** Fetches every transcript, so a reopened panel can restore its history. */
+  | { type: 'getTranscripts' }
   | { type: 'importMarkdown'; markdown: string; source: CaseSource }
   | { type: 'saveCase'; testCase: TestCase }
   | { type: 'deleteCase'; caseId: string; withScripts?: boolean }
@@ -86,17 +97,51 @@ export type PanelResponse =
   | { ok: true; text: string }
   | { ok: true; models: string[] }
   | { ok: true; usage: { storageBytes: number; artifactBytes: number; artifactCount: number } }
+  | { ok: true; transcript: RunTranscript | null }
+  | { ok: true; transcripts: RunTranscript[] }
   | { ok: true; message: string }
   | { ok: true }
   | { ok: false; error: string }
 
-/** Worker → panel, unsolicited. Sent while a run executes. */
+/**
+ * Worker → panel, unsolicited. Sent while a run executes.
+ *
+ * The run events carry the transcript sequence number the worker assigned. That is
+ * what lets the panel treat a live event and a later `getTranscript` replay as the
+ * same entry: identity is `runId` + `seq`, so re-entering the Chat tab refills what
+ * was missed without duplicating what already arrived.
+ */
 export type WorkerEvent =
   | { type: 'runUpdated'; run: TestRun }
   | { type: 'runStep'; runId: string; step: StepRecord }
-  | { type: 'runStatus'; runId: string; status: RunStatus; message?: string }
-  | { type: 'assistantText'; runId: string; delta: string }
-  | { type: 'toolCall'; runId: string; name: string; summary: string }
+  | { type: 'runStatus'; runId: string; status: RunStatus; message?: string; seq?: number }
+  /**
+   * Streamed assistant prose.
+   *
+   * Carries the bubble's full accumulated `text`, not just the new delta, so the
+   * panel assigns rather than concatenates. Concatenating is fragile: one event
+   * replayed or delivered twice silently doubles a word.
+   */
+  | { type: 'assistantText'; runId: string; delta: string; text: string; seq: number }
+  | {
+      type: 'toolCall'
+      runId: string
+      seq: number
+      name: string
+      /** Redacted arguments — never a secret value. */
+      args: string
+      result: string
+      ok: boolean
+      durationMs: number
+      round: number
+    }
+  /**
+   * Coarse progress for the long silent gaps.
+   *
+   * A model round or a page wait can run for tens of seconds emitting nothing else,
+   * and a panel that shows nothing in that window looks hung.
+   */
+  | { type: 'runPhase'; runId: string; seq: number; text: string }
   | { type: 'stateChanged' }
   | { type: 'bridgeStatus'; connected: boolean; error?: string }
   | { type: 'log'; entry: LogEntry }
@@ -160,6 +205,10 @@ export const is = {
     ok: true
     usage: { storageBytes: number; artifactBytes: number; artifactCount: number }
   } => value.ok && 'usage' in value,
+  transcript: (value: PanelResponse): value is { ok: true; transcript: RunTranscript | null } =>
+    value.ok && 'transcript' in value,
+  transcripts: (value: PanelResponse): value is { ok: true; transcripts: RunTranscript[] } =>
+    value.ok && 'transcripts' in value,
   message: (value: PanelResponse): value is { ok: true; message: string } =>
     value.ok && 'message' in value,
 }

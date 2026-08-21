@@ -23,6 +23,7 @@
  */
 
 import { useCallback, useState } from 'react'
+import { CancelButton } from './CancelButton'
 import { CasesTab } from './CasesTab'
 import { ChatTab } from './ChatTab'
 import { RunsTab } from './RunsTab'
@@ -96,6 +97,17 @@ function Shell() {
             <Badge tone='info' title='正在执行的运行数'>
               {activeCount} 个运行中
             </Badge>
+          ) : null}
+          {/*
+            Cancel lives in the header so it is reachable from every tab. It used to
+            exist only on a run card inside the Chat transcript, which meant a user
+            who had switched to Cases or Scripts could not stop a run at all.
+
+            Only offered for a single active run: with several running, "which one?"
+            has no answer here, and the Runs tab is where they are told apart.
+          */}
+          {activeCount === 1 && state.activeRunIds[0] ? (
+            <CancelButton runId={state.activeRunIds[0]} worker={worker} label='取消运行' />
           ) : null}
           {state.settings.bridge.enabled ? (
             <Badge

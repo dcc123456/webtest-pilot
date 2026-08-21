@@ -256,6 +256,59 @@ export interface TestRun {
 }
 
 /**
+ * One line of an agent run's live commentary.
+ *
+ * This exists because the panel is not a reliable place to keep it. The side panel
+ * unmounts a tab's component the moment the user switches tabs, so a transcript
+ * held in React state evaporates — and, worse, the events that arrived while it was
+ * unmounted are gone for good. Since the worker owns the run, the worker owns the
+ * story of the run, and the panel is only a view of it.
+ *
+ * Kept deliberately small and serializable: it crosses the `chrome.runtime`
+ * boundary on every fetch and is persisted to `storage.session`, which MV3 caps.
+ */
+export type TranscriptEntry =
+  | { kind: 'assistant'; seq: number; at: number; text: string }
+  | {
+      kind: 'tool'
+      seq: number
+      at: number
+      /** Tool name, e.g. `click`. */
+      name: string
+      /** Redacted, human-readable arguments — never a secret value. */
+      args: string
+      /** The tool's own reply, trimmed for display. */
+      result: string
+      ok: boolean
+      durationMs: number
+      /** Which model round issued it, so a stuck loop is visible. */
+      round: number
+    }
+  | {
+      kind: 'phase'
+      seq: number
+      at: number
+      /** Short status such as `正在调用模型（第 3/24 轮）`. */
+      text: string
+    }
+  | { kind: 'status'; seq: number; at: number; status: RunStatus; message?: string }
+
+/** Everything the panel needs to redraw an agent run's commentary from scratch. */
+export interface RunTranscript {
+  runId: string
+  caseName: string
+  /** Monotonic, so the panel can merge a fetch with live events without duplicates. */
+  entries: TranscriptEntry[]
+  /** True while the run is executing, so a reopened panel shows the right affordances. */
+  running: boolean
+  /** Set once the run reaches a terminal status. */
+  status?: RunStatus
+  startedAt: number
+  /** True when older entries were dropped to respect the size cap. */
+  truncated?: boolean
+}
+
+/**
  * The agent's attempt to diagnose and continue a failed replay.
  *
  * Recorded even when it fails. A recovery that did not work is exactly the

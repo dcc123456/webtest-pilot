@@ -24,7 +24,13 @@
 import type { ExtractedValue, Op } from '../lib/ops'
 import { DEFAULT_STEP_TIMEOUT_MS, describeStep, validateScript } from '../lib/script'
 import type { RunStatus, ScriptStep, StepRecord, TestScript } from '../lib/types'
-import { NotAllowedError, type Driver, type RunContext } from './driver'
+import {
+  CancelledError,
+  NotAllowedError,
+  sleepUnlessCancelled,
+  type Driver,
+  type RunContext,
+} from './driver'
 
 /** How the run reports progress, so the panel and the bridge can follow along. */
 export interface RunnerEvents {
@@ -69,12 +75,6 @@ const MAX_ATTEMPTS = 3
 
 /** Delay before retrying a not-found element. */
 const RETRY_DELAY_MS = 400
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms)
-  })
-}
 
 /**
  * Substitutes a step's secret reference for its value.
@@ -300,6 +300,19 @@ export async function runScript(
       record.durationMs = Date.now() - startedAt
       steps.push(record)
       events?.onStepDone?.(record)
+      // A cancellation thrown from inside a driver wait is a human's choice, not a
+      // harness fault. Hardcoding `error` here would tell the user their setup broke
+      // at the exact moment they pressed Cancel — and would colour the run red in
+      // every report, for something they did on purpose.
+      const cancelled = signal?.aborted === true || error instanceof CancelledError
+      if (cancelled) {
+        return {
+          status: 'cancelled',
+          steps,
+          extracted,
+          summary: `Cancelled during step ${index + 1} (${description}).`,
+        }
+      }
       return {
         status: 'error',
         steps,
@@ -439,7 +452,10 @@ async function executeStep(
     if (result.found) {
       return { ok: false, kind: 'action', attempts, error: lastError }
     }
-    if (attempt < MAX_ATTEMPTS) await sleep(RETRY_DELAY_MS)
+    // Interruptible, so cancelling during the retry backoff stops now rather than
+    // after the nap. Small in isolation, but these delays are exactly where a user
+    // presses Cancel and concludes nothing happened.
+    if (attempt < MAX_ATTEMPTS) await sleepUnlessCancelled(RETRY_DELAY_MS, deps.signal)
   }
 
   return {
