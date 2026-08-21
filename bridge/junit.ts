@@ -27,6 +27,13 @@ export interface JUnitOptions {
   className?: string
   /** Overrides the suite timestamp; injected by tests for a stable document. */
   timestamp?: number
+  /**
+   * Report a `recovered` run as a pass rather than a failure.
+   *
+   * Off by default so a stale script turns the build red and gets fixed. See
+   * {@link outcomeElement}.
+   */
+  treatRecoveredAsPass?: boolean
 }
 
 const DEFAULT_SUITE_NAME = 'WebTest Pilot'
@@ -83,11 +90,23 @@ export function runSeconds(run: TestRun): number {
  * `<skipped>` because a human stopped it deliberately and it is not a result.
  * A still-running run is reported as an error too — a report should never claim a
  * run passed just because it had not finished when the XML was written.
+ *
+ * `recovered` has no honest JUnit equivalent, because JUnit predates the idea:
+ * the application passed but the saved script is stale. It maps to `<failure>` by
+ * default so the build goes red and someone fixes the script — a green build is
+ * exactly how a suite quietly decays into a pile of agent runs. Teams that would
+ * rather keep shipping while they catch up pass `treatRecoveredAsPass`, which
+ * makes it a pass; the status still appears verbatim in the run detail either way.
  */
-export function outcomeElement(status: RunStatus): 'failure' | 'error' | 'skipped' | null {
+export function outcomeElement(
+  status: RunStatus,
+  treatRecoveredAsPass = false,
+): 'failure' | 'error' | 'skipped' | null {
   switch (status) {
     case 'passed':
       return null
+    case 'recovered':
+      return treatRecoveredAsPass ? null : 'failure'
     case 'failed':
       return 'failure'
     case 'cancelled':
@@ -143,19 +162,24 @@ function failureMessage(run: TestRun): string {
 }
 
 /** Renders one `<testcase>`, including its outcome child when there is one. */
-function testCaseXml(run: TestRun, className: string): string {
+function testCaseXml(run: TestRun, className: string, treatRecoveredAsPass: boolean): string {
   const attributes = [
     `name="${escapeXml(run.caseName)}"`,
     `classname="${escapeXml(className)}"`,
     `time="${runSeconds(run).toFixed(3)}"`,
   ].join(' ')
 
-  const element = outcomeElement(run.status)
+  const element = outcomeElement(run.status, treatRecoveredAsPass)
   if (!element) {
     // A passing run still carries its id, so a green report can be traced back to
-    // the evidence in the extension without re-running anything.
+    // the evidence in the extension without re-running anything. A recovered run
+    // accepted as a pass says so here, so the XML never hides why it was green.
+    const note =
+      run.status === 'recovered'
+        ? `run ${run.id} recovered: the script failed at step ${run.recovery?.failedAtStep ?? '?'} and the agent completed the case; the script still needs fixing`
+        : `run ${run.id}`
     return `    <testcase ${attributes}>\n      <system-out>${escapeXml(
-      `run ${run.id}`,
+      note,
     )}</system-out>\n    </testcase>`
   }
   if (element === 'skipped') {
@@ -184,13 +208,14 @@ function testCaseXml(run: TestRun, className: string): string {
 export function toJUnitXml(runs: TestRun[], options: JUnitOptions = {}): string {
   const suiteName = options.suiteName ?? DEFAULT_SUITE_NAME
   const className = options.className ?? DEFAULT_CLASS_NAME
+  const treatRecoveredAsPass = options.treatRecoveredAsPass ?? false
 
   let failures = 0
   let errors = 0
   let skipped = 0
   let totalSeconds = 0
   for (const run of runs) {
-    const element = outcomeElement(run.status)
+    const element = outcomeElement(run.status, treatRecoveredAsPass)
     if (element === 'failure') failures += 1
     else if (element === 'error') errors += 1
     else if (element === 'skipped') skipped += 1
@@ -213,7 +238,7 @@ export function toJUnitXml(runs: TestRun[], options: JUnitOptions = {}): string 
     `timestamp="${escapeXml(stamp)}"`,
   ].join(' ')
 
-  const body = runs.map((run) => testCaseXml(run, className)).join('\n')
+  const body = runs.map((run) => testCaseXml(run, className, treatRecoveredAsPass)).join('\n')
 
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',

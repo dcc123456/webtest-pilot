@@ -35,6 +35,7 @@ import {
   getSecrets,
 } from '../lib/storage'
 import type {
+  RecoveryAttempt,
   RunMode,
   RunStatus,
   RunTrigger,
@@ -46,11 +47,18 @@ import type {
 import {
   RefTable,
   SECRET_PLACEHOLDER,
+  classifyFailure,
+  diagnoseTool,
   dispatchTool,
   initialMessages,
+  parseDiagnosis,
+  parseToolArguments,
+  recoveredStatus,
+  recoveryInstruction,
   systemPrompt,
   toolSchemas,
   validateVerdict,
+  type Diagnosis,
   type Verdict,
 } from './agent'
 import { NotAllowedError, type Driver, type RunContext } from './driver'
@@ -332,6 +340,36 @@ async function replayScript(
     },
   })
 
+  // A replay that failed may be handed to the agent, which is the point of this
+  // whole feature: a saved script is a recording of one past journey, and the page
+  // it recorded drifts. Rather than reporting a stale selector as a product defect,
+  // the agent looks at the page, says what changed, and carries the case to a real
+  // verdict from the step that broke.
+  //
+  // Three conditions, all necessary:
+  //
+  // - **The case must be known.** Resuming means finishing the *test*, and without
+  //   its expectations there is nothing to finish honestly against — a script alone
+  //   says what to click, never what should be true at the end.
+  // - **The trigger must be permitted.** Unattended this is off by default: a
+  //   schedule turning red into green is a report nobody reads and a script nobody
+  //   fixes. See `resumeOnFailure`.
+  // - **The failure must be a step failure.** `cancelled` means a human said stop,
+  //   and `error` means the harness itself broke — resuming into a dead tab or an
+  //   unreachable model would just fail again, more expensively.
+  const resumable = result.status === 'failed' && result.failure !== undefined
+  if (resumable && settings.policy.resumeOnFailure.includes(run.trigger) && options.testCase) {
+    const recovered = await recoverFailedReplay(
+      options.testCase,
+      run,
+      driver,
+      context,
+      options,
+      result,
+    )
+    if (recovered) return recovered
+  }
+
   const finished: TestRun = {
     ...run,
     status: result.status,
@@ -380,6 +418,7 @@ async function driveWithModel(
   driver: Driver,
   context: RunContext,
   options: StartOptions,
+  recovery?: RecoveryContext,
 ): Promise<RunOutcome> {
   const settings = await getSettings()
   const provider = await activeProvider()
@@ -410,7 +449,11 @@ async function driveWithModel(
   // the fix. Doing it here rather than asking the model to call `open_url` also
   // saves a tool round and removes a step it could forget.
   const startUrl = testCase.startUrl?.trim() ?? ''
-  if (startUrl) {
+  // A recovery run must NOT navigate. The replay left the browser part-way through
+  // the flow — logged in, a form filled, a cart populated — and re-opening the
+  // start URL would throw that away and put the model at the beginning of a
+  // journey whose earlier steps have already really happened.
+  if (startUrl && !recovery) {
     const startedAt = Date.now()
     options.observer?.onStatus?.(run.id, 'running', `打开 ${startUrl}`)
     try {
@@ -450,13 +493,18 @@ async function driveWithModel(
       secretNames,
       maxRounds,
     }),
-    renderCaseForModel(testCase),
+    // A recovery run gets a different opening instruction: the case as written
+    // describes work that is already half done, and handing that over unchanged is
+    // what makes a model redo a submitted form.
+    recovery ? recovery.instruction : renderCaseForModel(testCase),
   )
   const tools = toolSchemas({ selfHeal: settings.policy.selfHeal, secretNames })
+  if (recovery) tools.push(diagnoseTool())
   const deadline = Date.now() + settings.policy.runTimeoutMs
 
   let verdict: Verdict | undefined
   let stoppedBecause: string | undefined
+  let diagnosis: Diagnosis | undefined
 
   for (let round = 0; round < maxRounds; round += 1) {
     if (options.signal?.aborted) {
@@ -522,6 +570,23 @@ async function driveWithModel(
     for (const call of toolCalls) {
       if (options.signal?.aborted) break
       const startedAt = Date.now()
+
+      // `diagnose` is answered here rather than in `dispatchTool` because it touches
+      // no page: it is the model explaining itself, and the explanation is kept even
+      // if recovery then fails — a recovery that did not work is precisely what
+      // tells a human the failure is real rather than a stale selector.
+      if (call.function.name === 'diagnose') {
+        diagnosis = parseDiagnosis(parseToolArguments(call.function.arguments))
+        options.observer?.onToolCall?.(run.id, 'diagnose', diagnosis.diagnosis)
+        messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          content:
+            'Diagnosis recorded. Now continue the test from where it stopped, without repeating any completed step, and assert every expectation before calling finish.',
+        })
+        continue
+      }
+
       const outcome = await dispatchTool(call, {
         driver,
         context,
@@ -597,16 +662,24 @@ async function driveWithModel(
     stoppedBecause = `模型在 ${maxRounds} 轮工具调用内没有给出结论。`
   }
 
-  // The check that makes a green run mean something.
+  // The check that makes a green run mean something. Recovery does NOT get a
+  // softer bar: the verdict is validated against the case's own expectations
+  // exactly as for a normal run, so "the agent rescued it" can never mean "we
+  // stopped checking".
   const checked = verdict
     ? validateVerdict(verdict, testCase.expectations, assertionsPassed)
     : { status: 'error' as const, reason: stoppedBecause }
 
-  const status: RunStatus = options.signal?.aborted
+  const baseStatus: RunStatus = options.signal?.aborted
     ? 'cancelled'
     : verdict
       ? checked.status
       : 'error'
+
+  // Only a validated pass is relabelled. A recovered run that still failed stays
+  // `failed`, because the application really did not do what the case requires.
+  const status: RunStatus =
+    recovery && baseStatus === 'passed' ? recoveredStatus('passed') : baseStatus
 
   const summary = verdict
     ? checked.reason
@@ -617,7 +690,13 @@ async function driveWithModel(
   let recordedScript: TestScript | undefined
   // Only a genuine pass is worth recording: saving a script from a failed run
   // would enshrine the broken path as the expected one.
-  if (status === 'passed' && settings.policy.autoSaveScript && recorder.length > 0) {
+  //
+  // A recovery run is excluded on purpose. Its actions are a repair of one broken
+  // step, not a recording of the whole journey — the earlier steps happened during
+  // the replay and were never recorded here, so saving this would produce a script
+  // that starts in the middle. The fix belongs in the existing script, which is why
+  // recovery only ever *suggests* one.
+  if (status === 'passed' && !recovery && settings.policy.autoSaveScript && recorder.length > 0) {
     try {
       recordedScript = await saveScript(
         recorder.toScript({
@@ -638,24 +717,46 @@ async function driveWithModel(
   }
 
   const failure =
-    status === 'passed'
+    status === 'passed' || status === 'recovered'
       ? undefined
       : {
           stepIndex: steps.length - 1,
           message: verdict?.problem ?? checked.reason ?? summary,
         }
 
+  // Assembled here so the run carries the whole story: what broke, what the model
+  // made of it, and what it did next. This is the material a human needs to fix the
+  // script for real, and the evidence for judging whether to trust the result.
+  const recoveryRecord: RecoveryAttempt | undefined = recovery
+    ? {
+        failedAtStep: recovery.failedAtStep,
+        originalError: recovery.originalError,
+        cause: recovery.cause,
+        resumed: verdict !== undefined,
+        steps,
+        ...(diagnosis?.diagnosis ? { diagnosis: diagnosis.diagnosis } : {}),
+        ...(diagnosis?.proposal ? { proposal: diagnosis.proposal } : {}),
+        ...(stoppedBecause ? { gaveUpBecause: stoppedBecause } : {}),
+        ...(diagnosis?.suggestedFix
+          ? { suggestedFix: { stepIndex: recovery.failedAtStep, note: diagnosis.suggestedFix } }
+          : {}),
+      }
+    : undefined
+
   const finished: TestRun = {
     ...run,
     status,
     finishedAt: Date.now(),
     heartbeatAt: Date.now(),
-    steps,
+    // A recovery run's own steps are numbered after the replay's, so the stored run
+    // reads as one continuous history rather than restarting at zero.
+    steps: recovery ? [...recovery.priorSteps, ...steps] : steps,
     artifactIds,
     summary,
     ...(failure ? { failure } : {}),
     ...(recordedScript ? { scriptId: recordedScript.id } : {}),
     ...(Object.keys(extracted).length > 0 ? { extracted } : {}),
+    ...(recoveryRecord ? { recovery: recoveryRecord } : {}),
   }
   await saveRun(finished)
   await logOutcome(finished)
@@ -663,6 +764,102 @@ async function driveWithModel(
   options.observer?.onStatus?.(run.id, status, summary)
 
   return { run: finished, ...(recordedScript ? { recordedScript } : {}) }
+}
+
+/**
+ * Everything the agent needs to take over a replay that stopped partway.
+ *
+ * Passed rather than recomputed because only the replay knows it: which step died,
+ * what the runner blamed, and — critically — which steps have *already really
+ * happened*. That last list is what stops the model from submitting the same order
+ * twice.
+ */
+interface RecoveryContext {
+  failedAtStep: number
+  originalError: string
+  cause: 'selector' | 'application'
+  /** The replay's step records, so the stored run reads as one history. */
+  priorSteps: StepRecord[]
+  /** The opening instruction, built by {@link recoveryInstruction}. */
+  instruction: string
+}
+
+/**
+ * Hands a failed replay to the agent, from the step that broke.
+ *
+ * Returns `undefined` when recovery could not even be attempted (no provider
+ * configured), so the caller reports the original failure rather than masking a
+ * real result behind a setup problem.
+ *
+ * The failed step is looked up by matching `StepRecord.index` rather than by array
+ * position. Today the runner emits dense, in-order records, so the two are
+ * equivalent — this is defensive, not a fix for a live bug. It is written this way
+ * because `stepIndex` is a step *identity* (the runner numbers a pre-step
+ * navigation `-1`), and if a record is ever skipped or reordered, resuming from a
+ * position would silently name the wrong step and re-run an effectful one.
+ */
+async function recoverFailedReplay(
+  testCase: TestCase,
+  run: TestRun,
+  driver: Driver,
+  context: RunContext,
+  options: StartOptions,
+  result: { status: RunStatus; steps: StepRecord[]; failure?: { stepIndex: number; message: string } },
+): Promise<RunOutcome | undefined> {
+  const provider = await activeProvider()
+  if (!provider || !provider.apiKey.trim()) {
+    await appendLog({
+      level: 'info',
+      source: `run:${run.id}`,
+      message: '脚本失败后未启动智能体接管：尚未配置模型（provider）。',
+    })
+    return undefined
+  }
+
+  const failedAtStep = result.failure?.stepIndex ?? 0
+  const originalError = result.failure?.message ?? '未知失败'
+  const failedRecord = result.steps.find((step) => step.index === failedAtStep)
+  const cause = classifyFailure(failedRecord, originalError)
+
+  // Only steps that genuinely ran and succeeded count as "already done". A step
+  // that failed did not happen, so telling the model it did would leave a gap in
+  // the flow that nothing ever performs.
+  const completed = result.steps.filter((step) => step.ok && step.index >= 0)
+
+  // The case's own step list is the remaining work, from the failure onwards. The
+  // case is the source of truth here rather than the script: the script is the
+  // thing that turned out to be wrong.
+  const remaining = testCase.steps.slice(Math.max(0, failedAtStep))
+
+  options.observer?.onStatus?.(
+    run.id,
+    'running',
+    `第 ${failedAtStep + 1} 步失败，智能体开始分析并尝试继续……`,
+  )
+  await appendLog({
+    level: 'info',
+    source: `run:${run.id}`,
+    message: `脚本在第 ${failedAtStep + 1} 步失败（${cause === 'selector' ? '定位失效' : '应用行为'}），智能体接管续跑。`,
+  })
+
+  const instruction = recoveryInstruction({
+    caseName: testCase.name,
+    steps: remaining,
+    expectations: testCase.expectations,
+    completed,
+    failedStep: failedRecord?.description ?? `step ${failedAtStep + 1}`,
+    failedAtStep,
+    error: originalError,
+    cause,
+  })
+
+  return driveWithModel(testCase, run, driver, context, options, {
+    failedAtStep,
+    originalError,
+    cause,
+    priorSteps: result.steps,
+    instruction,
+  })
 }
 
 /** Re-exported so triggers can distinguish a policy refusal from a failure. */

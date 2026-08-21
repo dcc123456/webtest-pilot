@@ -143,6 +143,7 @@ const STATUS_LABEL: Record<RunStatus, string> = {
   error: '执行错误',
   cancelled: '已取消',
   interrupted: '已中断',
+  recovered: '通过（脚本已失效，智能体接管）',
 }
 
 const TITLE_PREFIX: Record<RunStatus, string> = {
@@ -153,6 +154,7 @@ const TITLE_PREFIX: Record<RunStatus, string> = {
   error: '测试执行错误',
   cancelled: '测试已取消',
   interrupted: '测试中断',
+  recovered: '测试通过，但脚本需要修复',
 }
 
 /**
@@ -161,6 +163,10 @@ const TITLE_PREFIX: Record<RunStatus, string> = {
  * `error` and `interrupted` share orange with intent: neither is a verdict about
  * the application under test, so colouring them red would send people hunting
  * for a bug that the suite never actually looked for.
+ *
+ * `recovered` is also orange, and for a related reason: green would say "nothing
+ * to do here" when in fact a saved script is broken and will keep costing model
+ * calls until someone fixes it. The application is fine; the test is not.
  */
 const STATUS_TEMPLATE: Record<RunStatus, FeishuCardTemplate> = {
   queued: 'blue',
@@ -170,6 +176,7 @@ const STATUS_TEMPLATE: Record<RunStatus, FeishuCardTemplate> = {
   error: 'orange',
   interrupted: 'orange',
   cancelled: 'grey',
+  recovered: 'orange',
 }
 
 const TRIGGER_LABEL: Record<RunTrigger, string> = {
@@ -195,6 +202,19 @@ export function isFailureStatus(status: RunStatus): boolean {
   return FAILURE_STATUSES.includes(status)
 }
 
+/**
+ * Statuses worth sending a message about under the `failure` policy.
+ *
+ * `recovered` is here but deliberately *not* in {@link FAILURE_STATUSES}, and the
+ * gap between the two lists is the whole point. A recovered run means the
+ * application is fine and a saved script is stale: worth telling the team, since
+ * the script will keep burning model calls until someone fixes it — but not worth
+ * an @-mention, because nothing is on fire and the app under test is healthy.
+ */
+export function needsAttention(status: RunStatus): boolean {
+  return isFailureStatus(status) || status === 'recovered'
+}
+
 // --- Policy ------------------------------------------------------------------
 
 /**
@@ -213,7 +233,7 @@ export function shouldNotify(policy: NotifyPolicy, status: RunStatus): boolean {
     case 'always':
       return status !== 'queued' && status !== 'running'
     case 'failure':
-      return isFailureStatus(status)
+      return needsAttention(status)
   }
 }
 

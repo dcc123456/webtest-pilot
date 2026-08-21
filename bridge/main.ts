@@ -44,6 +44,7 @@ run 选项 (options):
   --wait                 等待运行结束，未通过则退出码非零 / block until finished; non-zero exit unless passed
   --timeout N            等待上限，秒 / wait cap in seconds (default 300)
   --junit <out.xml>      写出 JUnit 报告 / write a JUnit XML report (implies --wait)
+  --accept-recovered     脚本失效但智能体跑通时按通过处理 / treat a recovered run as a pass
   --agent                强制使用 agent 而非回放脚本 / force the agent instead of replaying a script
   --save                 把 Markdown 用例保存到扩展 / persist a Markdown case in the extension
 
@@ -336,14 +337,35 @@ async function commandRun(args: ParsedArgs): Promise<number> {
   const detail = await request<RunDetail>(context, 'POST', '/api/runs', body)
   process.stdout.write(formatRunSummary(detail))
 
+  const treatRecoveredAsPass = flagSet(args, 'accept-recovered')
+
   if (junitPath !== undefined) {
-    const xml = toJUnitXml([detail], { suiteName: basename(target) })
+    const xml = toJUnitXml([detail], { suiteName: basename(target), treatRecoveredAsPass })
     await writeFile(resolvePath(junitPath), xml, 'utf8')
     process.stdout.write(`JUnit 报告已写入 / wrote ${resolvePath(junitPath)}\n`)
   }
 
   // The contract with CI: only `passed` is a green build. `cancelled` included —
   // a run someone stopped is not evidence that the application works.
+  //
+  // `recovered` is a red build by default, which is the deliberate part: the
+  // application passed, but it took an agent to get there because the saved script
+  // is stale. Going green would mean nobody ever learns that, and the suite decays
+  // into slow, expensive agent runs one broken selector at a time.
+  // `--accept-recovered` opts into green for teams catching up on maintenance.
+  if (detail.status === 'recovered') {
+    if (treatRecoveredAsPass) {
+      process.stdout.write(
+        '注意 / note: 用例通过了，但回放脚本已失效（--accept-recovered 按通过处理）。请尽快修脚本。\n',
+      )
+      return 0
+    }
+    process.stdout.write(
+      '构建判为失败 / build failed: 用例本身通过了，但回放脚本已失效，需要人工修复。\n' +
+        '若要在修复期间让流水线放行，可加 --accept-recovered。\n',
+    )
+    return EXIT_TEST_FAILED
+  }
   return detail.status === 'passed' ? 0 : EXIT_TEST_FAILED
 }
 
@@ -392,6 +414,7 @@ function statusLabel(status: TestRun['status']): string {
     error: '执行错误',
     cancelled: '已取消',
     interrupted: '被中断',
+    recovered: '已修复通过（脚本失效）',
   }
   return `${labels[status]} (${status})`
 }

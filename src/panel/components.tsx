@@ -189,6 +189,12 @@ const STATUS_META: Record<RunStatus, { label: string; tone: string; title: strin
     tone: 'warn',
     title: '后台在运行结束前停止了（Service Worker 被回收或浏览器关闭）',
   },
+  recovered: {
+    label: '已修复通过（recovered）',
+    tone: 'warn',
+    title:
+      '回放脚本中途失效，智能体接管后跑完了剩下的步骤，并且用例预期最终成立。被测应用是好的，但这个脚本已经过期——不修的话每次运行都要多花一次模型调用。',
+  },
 }
 
 export function StatusBadge({ status, dot = true }: { status: RunStatus; dot?: boolean }) {

@@ -30,7 +30,7 @@ import {
   type ProviderProfile,
 } from '../lib/providers'
 import { suggestPatternForUrl, validatePattern } from '../lib/urlmatch'
-import type { FeishuConfig, NotifyPolicy, RunPolicy } from '../lib/types'
+import type { FeishuConfig, NotifyPolicy, RunPolicy, RunTrigger } from '../lib/types'
 import {
   Badge,
   Button,
@@ -533,6 +533,35 @@ function SitesSection({ worker }: { worker: WorkerApi }) {
 
 // --- 3. Run policy ----------------------------------------------------------
 
+/**
+ * Triggers that can be allowed to recover, with the tradeoff stated per row.
+ *
+ * `replay` is absent on purpose: a bare script replay has no case behind it, so
+ * there are no expectations to finish against and recovery cannot be honest.
+ */
+const TRIGGERS: { id: RunTrigger; label: string; hint: string }[] = [
+  {
+    id: 'manual',
+    label: '手动运行（推荐开启）',
+    hint: '你就在旁边看着，能立刻读到失败原因并判断是否可信 —— 这是续跑最有价值的场景。',
+  },
+  {
+    id: 'chat',
+    label: '对话中运行',
+    hint: '同样是你本人在操作，与手动运行同等对待。',
+  },
+  {
+    id: 'schedule',
+    label: '定时任务（默认关闭）',
+    hint: '半夜跑的任务没人看。开启后原本会变红的结果可能被智能体兜成 recovered，脚本失效可能长期没人发现。',
+  },
+  {
+    id: 'bridge',
+    label: '本地接口 / CI（默认关闭）',
+    hint: '流水线只看退出码。除非同时确认了 recovered 的处理方式，否则建议保持关闭。',
+  },
+]
+
 function PolicySection({ worker }: { worker: WorkerApi }) {
   const { state, call } = worker
   const policy = state.settings.policy
@@ -616,12 +645,50 @@ function PolicySection({ worker }: { worker: WorkerApi }) {
           自愈已开启。请把回放结果当作需要复核的对象：新提出的选择器会标记为「待确认」，不会自动生效。
         </Notice>
       ) : null}
+
+      {/* Recovery is a per-trigger decision, not a single switch: the value and the
+          risk both depend on whether a human is watching the run. */}
+      <div className='field'>
+        <div className='field__label'>脚本失败后让智能体分析并续跑</div>
+        <div className='field__hint'>
+          回放脚本中途失败时，智能体会先看当前页面、说明失败原因，再从失败的那一步继续跑完用例。已经执行过的步骤不会重跑
+          —— 否则可能重复下单。用例预期仍然必须逐条断言通过，智能体无权把失败判成成功；这类运行会标记为「已修复通过（recovered）」，提醒你脚本该修了。
+        </div>
+        {TRIGGERS.map((trigger) => (
+          <Toggle
+            key={trigger.id}
+            label={trigger.label}
+            hint={trigger.hint}
+            checked={policy.resumeOnFailure.includes(trigger.id)}
+            onChange={(value) =>
+              patch({
+                resumeOnFailure: value
+                  ? [...policy.resumeOnFailure, trigger.id]
+                  : policy.resumeOnFailure.filter((item) => item !== trigger.id),
+              })
+            }
+          />
+        ))}
+      </div>
+
+      {policy.resumeOnFailure.some((trigger) => trigger === 'schedule' || trigger === 'bridge') ? (
+        <Notice kind='warn'>
+          定时任务或本地接口（CI）已开启续跑。请注意：这类运行没人盯着，脚本失效会被智能体「兜住」，
+          报告里虽然写着 recovered，但如果没人去修脚本，测试套件会慢慢退化成又慢又贵的智能体运行。
+        </Notice>
+      ) : null}
+
+      <Toggle
+        label='把 recovered 当作通过（CI 放行）'
+        hint='默认关闭：脚本失效会让 CI 变红，逼着人去修。开启后 JUnit 报告与命令行退出码都按通过处理，状态依然会显示 recovered。命令行也可临时加 --accept-recovered。'
+        checked={policy.treatRecoveredAsPass}
+        onChange={(value) => patch({ treatRecoveredAsPass: value })}
+      />
     </>
   )
 }
 
 // --- 4. Secrets -------------------------------------------------------------
-
 function SecretsSection({ worker }: { worker: WorkerApi }) {
   const { state, call } = worker
   const [name, setName] = useState('')

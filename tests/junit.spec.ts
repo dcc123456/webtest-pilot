@@ -207,10 +207,32 @@ describe('toJUnitXml status mapping', () => {
       error: 'error',
       cancelled: 'skipped',
       interrupted: 'error',
+      // A stale script is a failure by default, so the build goes red and someone
+      // fixes it rather than letting the suite decay into agent runs.
+      recovered: 'failure',
     }
     for (const [status, element] of Object.entries(expected)) {
       expect(outcomeElement(status as RunStatus)).toBe(element)
     }
+  })
+
+  it('accepts a recovered run as a pass only when CI opts in', () => {
+    expect(outcomeElement('recovered', true)).toBeNull()
+    // The opt-in must not quietly reclassify a genuine failure too.
+    expect(outcomeElement('failed', true)).toBe('failure')
+    expect(outcomeElement('error', true)).toBe('error')
+  })
+
+  it('says why a recovered run was allowed to be green, so the XML never hides it', () => {
+    const xml = toJUnitXml(
+      [makeRun({ status: 'recovered', recovery: { failedAtStep: 4, originalError: 'not found', cause: 'selector', resumed: true } })],
+      { treatRecoveredAsPass: true },
+    )
+    const document = parseXml(xml)
+    expect(document.querySelector('failure')).toBeNull()
+    expect(document.querySelector('system-out')?.textContent).toMatch(/recovered/)
+    // The step number is the actionable part: it says which selector to fix.
+    expect(document.querySelector('system-out')?.textContent).toContain('step 4')
   })
 })
 

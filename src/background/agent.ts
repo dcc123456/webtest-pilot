@@ -28,6 +28,7 @@ import type { Op, PageSnapshot, SnapshotElement, ExtractWhat } from '../lib/ops'
 import type { Target } from '../lib/selectors'
 import { describeTarget } from '../lib/selectors'
 import type { ActionName } from '../lib/ops'
+import type { StepRecord } from '../lib/types'
 import { NotAllowedError, type Driver, type RunContext } from './driver'
 import type { RecordedAction } from './recorder'
 
@@ -470,8 +471,7 @@ export function systemPrompt(options: {
  * A compact line-per-element table rather than JSON: it costs roughly a third of
  * the tokens for the same information, and tokens per round are the binding
  * constraint on how long a test can run.
- */
-export function renderSnapshot(page: PageSnapshot): string {
+ */export function renderSnapshot(page: PageSnapshot): string {
   const lines: string[] = [`URL: ${page.url}`, `Title: ${page.title}`]
 
   if (page.elements.length === 0) {
@@ -1070,4 +1070,190 @@ export function initialMessages(system: string, instruction: string): WireMessag
     { role: 'system', content: system },
     { role: 'user', content: instruction },
   ]
+}
+
+// --- Recovering a failed replay ----------------------------------------------
+
+/**
+ * What the runner blamed for a step failure, translated into a prior.
+ *
+ * The runner already distinguishes these; recovery needs the distinction because
+ * the two cases have opposite likely explanations. A not-found element is usually
+ * a stale script — the page moved on and the recording did not. A found element
+ * that refused the action is usually the application: a genuinely disabled button,
+ * an assertion that genuinely does not hold.
+ *
+ * Both may be resumed, but the model must be told which it is looking at, or it
+ * will "fix" a real bug by clicking something else that happens to work.
+ */
+export function classifyFailure(step: StepRecord | undefined, message: string): 'selector' | 'application' {
+  const text = `${step?.error ?? ''} ${message}`.toLowerCase()
+  // The runner's own not-found phrasing, which is the only signal that means "the
+  // script pointed somewhere that no longer exists".
+  const notFound =
+    text.includes('no element matched') ||
+    text.includes('not found') ||
+    text.includes('找不到') ||
+    text.includes('no longer matches')
+  return notFound ? 'selector' : 'application'
+}
+
+/**
+ * The instruction that opens a recovery attempt.
+ *
+ * Deliberately shaped to keep two jobs separate: first say what went wrong, then
+ * carry the case to a real verdict. A single "fix it and continue" prompt invites
+ * the model to skip the diagnosis and start clicking, which is how a recovery run
+ * turns into an expensive way of hiding a bug.
+ *
+ * The steps already completed are listed as *done* and explicitly not to be
+ * repeated. That is the safety-critical sentence in this whole feature: the replay
+ * may have already submitted an order or sent an email, and a model that helpfully
+ * "starts from the top" would do it a second time.
+ */
+export function recoveryInstruction(options: {
+  caseName: string
+  steps: string[]
+  expectations: string[]
+  completed: StepRecord[]
+  failedStep: string
+  failedAtStep: number
+  error: string
+  cause: 'selector' | 'application'
+}): string {
+  const done =
+    options.completed.length > 0
+      ? options.completed.map((step) => `  ${step.index + 1}. ${step.description} — done`).join('\n')
+      : '  (none — it failed on the first step)'
+
+  const prior =
+    options.cause === 'selector'
+      ? [
+          'The runner could not find the element this step describes. That usually means the saved script is out of date rather than the application being broken: the page was redesigned, a label changed, an id moved.',
+          'So: look at the page as it is now, find the element this step was meant to act on, and carry on.',
+          'But do not force it. If the element genuinely is not there because the feature is gone or the page is wrong, that is a real finding — report failed and say so.',
+        ]
+      : [
+          'The element was found, but the action or assertion did not succeed. That usually means the application really is misbehaving — a disabled button, a value that did not match, a form that refused.',
+          'Do NOT look for another way to make this step pass. Clicking a different button that happens to work would hide a real bug, which is the opposite of your job.',
+          'Investigate what the page actually shows, then continue the remaining steps only if it makes sense to. If the expectation cannot hold, report failed.',
+        ]
+
+  return [
+    `A saved test script was replaying and stopped partway. Your job is to work out why, then finish the test honestly.`,
+    '',
+    `Test: ${options.caseName}`,
+    '',
+    'Steps already completed — these have really happened, do NOT do them again:',
+    done,
+    '',
+    `Step ${options.failedAtStep + 1} is where it stopped: ${options.failedStep}`,
+    `Reported error: ${options.error}`,
+    '',
+    ...prior,
+    '',
+    'The remaining work, in order:',
+    ...options.steps.map((step, index) => `  ${index + 1}. ${step}`),
+    '',
+    options.expectations.length > 0
+      ? `What this test must verify (assert each one — your verdict is checked against these):\n${options.expectations
+          .map((line) => `  - ${line}`)
+          .join('\n')}`
+      : 'This case lists no explicit expectations, so completing the remaining steps is the criterion.',
+    '',
+    'Do this in order:',
+    '1. Call snapshot to see the current page.',
+    '2. Call diagnose exactly once with your reading of why the step failed.',
+    '3. Continue the test from that point, asserting every expectation above.',
+    '4. Call finish with your verdict.',
+    '',
+    'Never repeat an action from the completed list. If you are unsure whether something already happened, check the page rather than redoing it.',
+  ].join('\n')
+}
+
+/**
+ * The `diagnose` tool.
+ *
+ * Separate from `finish` so the explanation is recorded even when recovery then
+ * fails — a recovery that did not work is exactly what tells a human the failure
+ * is real rather than a stale selector, and losing that would waste the whole
+ * attempt.
+ */
+export function diagnoseTool(): WireTool {
+  return {
+    type: 'function',
+    function: {
+      name: 'diagnose',
+      description:
+        'Report why the replayed step failed, before you continue. Call this exactly once, after looking at the page.',
+      parameters: {
+        type: 'object',
+        properties: {
+          cause: {
+            type: 'string',
+            enum: ['stale_selector', 'page_changed', 'application_bug', 'timing', 'data', 'unknown'],
+            description:
+              'stale_selector: the element exists but the script described it in a way that no longer matches. page_changed: the flow or layout is genuinely different now. application_bug: the page is broken or behaving wrongly. timing: it was not ready yet. data: required data is missing or wrong.',
+          },
+          diagnosis: {
+            type: 'string',
+            description: 'What you actually observed on the page, in one or two sentences. Concrete, not speculative.',
+          },
+          proposal: {
+            type: 'string',
+            description: 'What you intend to do to continue, or why the test cannot continue.',
+          },
+          suggestedFix: {
+            type: 'string',
+            description:
+              'Optional: how a human should repair the saved step, e.g. which stable attribute to target instead.',
+          },
+        },
+        required: ['cause', 'diagnosis', 'proposal'],
+      },
+    },
+  }
+}
+
+/** A model's parsed `diagnose` call. */
+export interface Diagnosis {
+  cause: 'stale_selector' | 'page_changed' | 'application_bug' | 'timing' | 'data' | 'unknown'
+  diagnosis: string
+  proposal: string
+  suggestedFix?: string
+}
+
+/** Reads a `diagnose` call, tolerating a model that omits or mistypes the enum. */
+export function parseDiagnosis(args: Record<string, unknown>): Diagnosis {
+  const allowed: Diagnosis['cause'][] = [
+    'stale_selector',
+    'page_changed',
+    'application_bug',
+    'timing',
+    'data',
+    'unknown',
+  ]
+  const raw = typeof args.cause === 'string' ? args.cause.trim() : ''
+  const cause = (allowed as string[]).includes(raw) ? (raw as Diagnosis['cause']) : 'unknown'
+  const result: Diagnosis = {
+    cause,
+    diagnosis: typeof args.diagnosis === 'string' ? args.diagnosis.trim() : '',
+    proposal: typeof args.proposal === 'string' ? args.proposal.trim() : '',
+  }
+  const fix = typeof args.suggestedFix === 'string' ? args.suggestedFix.trim() : ''
+  if (fix) result.suggestedFix = fix
+  return result
+}
+
+/**
+ * Decides the status of a run that was recovered.
+ *
+ * Note what this does *not* do: it never turns a `failed` verdict green. Recovery
+ * changes how a passing result is *labelled*, never whether it passed — that
+ * remains {@link validateVerdict}'s job, checked against the case's own
+ * expectations exactly as for a normal run. This function only answers "the case
+ * passed, but should we admit the script is broken?", and the answer is always yes.
+ */
+export function recoveredStatus(validated: 'passed' | 'failed'): 'recovered' | 'failed' {
+  return validated === 'passed' ? 'recovered' : 'failed'
 }

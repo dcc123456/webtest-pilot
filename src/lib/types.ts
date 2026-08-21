@@ -144,10 +144,34 @@ export type RunStatus =
   | 'error'
   | 'cancelled'
   | 'interrupted'
+  /**
+   * A replay failed, the agent took over, and the case's expectations then held.
+   *
+   * Deliberately neither `passed` nor `failed`. Calling it `passed` would hide
+   * that the saved script is now broken, and a script nobody notices is broken
+   * stops being a test — it silently becomes an agent run, at agent cost and
+   * agent speed. Calling it `failed` would throw away a real, verified result and
+   * teach people to ignore red.
+   *
+   * So it is its own colour: the case works, the script does not. CI decides
+   * whether that is acceptable via `treatRecoveredAsPass`.
+   */
+  | 'recovered'
 
 /** True for states that will never change again. */
 export function isTerminalStatus(status: RunStatus): boolean {
   return status !== 'queued' && status !== 'running'
+}
+
+/**
+ * True for a run whose expectations were met, however it got there.
+ *
+ * The one place `recovered` and `passed` are deliberately the same thing: the
+ * application under test behaved correctly. Anything reporting on the *health of
+ * the test suite* must keep them apart.
+ */
+export function isSuccessStatus(status: RunStatus): boolean {
+  return status === 'passed' || status === 'recovered'
 }
 
 /** One executed step. */
@@ -220,6 +244,60 @@ export interface TestRun {
   bridgeRequestId?: string
   /** Model tokens spent, when the provider reported them. */
   usage?: { promptTokens?: number; completionTokens?: number }
+  /**
+   * What the agent did after a replay failed.
+   *
+   * Present only when recovery was attempted, so an ordinary run carries no extra
+   * weight. Kept on the run rather than only in the log because this is the
+   * evidence a reviewer needs to answer "should I trust this green?" — and the
+   * material for fixing the script for real.
+   */
+  recovery?: RecoveryAttempt
+}
+
+/**
+ * The agent's attempt to diagnose and continue a failed replay.
+ *
+ * Recorded even when it fails. A recovery that did not work is exactly the
+ * information a human needs — it says the failure is not a stale selector, so the
+ * application probably really is broken.
+ */
+export interface RecoveryAttempt {
+  /** Step index the replay died on, matching `StepRecord.index`. */
+  failedAtStep: number
+  /** The replay's own error, kept verbatim so diagnosis cannot launder it. */
+  originalError: string
+  /**
+   * Which layer the runner blamed, and therefore why recovery was allowed.
+   *
+   * `selector` means the element was not found — very likely a stale script.
+   * `application` means the page was found but behaved wrongly (a disabled
+   * button, an assertion that did not hold). Both may be resumed, per the user's
+   * decision, but they carry opposite priors and the report must not blur them.
+   */
+  cause: 'selector' | 'application'
+  /** The model's plain-language reading of the failure, for a human to judge. */
+  diagnosis?: string
+  /** What the model proposed doing about it. */
+  proposal?: string
+  /** Whether the agent then drove the case's remaining steps to a verdict. */
+  resumed: boolean
+  /**
+   * Steps the agent ran while recovering, numbered after the replay's.
+   *
+   * Separate from `TestRun.steps` so a reader can always tell which actions came
+   * from the trusted script and which from the model.
+   */
+  steps?: StepRecord[]
+  /** Why recovery stopped, when it did not reach a verdict. */
+  gaveUpBecause?: string
+  /**
+   * A better target the agent found for the failed step.
+   *
+   * A proposal, never applied: a script that silently rewrites itself can drift
+   * away from what the author meant while still reporting green.
+   */
+  suggestedFix?: { stepIndex: number; note: string }
 }
 
 // --- Schedules ---------------------------------------------------------------
@@ -324,6 +402,24 @@ export interface RunPolicy {
   selfHeal: boolean
   /** Ask the model to record a script automatically when an agent run passes. */
   autoSaveScript: boolean
+  /**
+   * Triggers for which the agent may diagnose a failed replay and continue it.
+   *
+   * Per-trigger rather than a single switch, because the value and the risk both
+   * depend on who is watching. A human running by hand wants the diagnosis
+   * immediately and can weigh it. A 3am schedule or a CI job produces a verdict
+   * someone will act on without reading the transcript, so there the honest
+   * default is to report the failure and let a person look.
+   */
+  resumeOnFailure: RunTrigger[]
+  /**
+   * Whether `recovered` counts as success for notifications and CI exit codes.
+   *
+   * Off by default: the point of `recovered` is that someone finds out the script
+   * is broken. Teams that would rather keep the build green while they catch up on
+   * script maintenance can turn it on, and still see the status in reports.
+   */
+  treatRecoveredAsPass: boolean
 }
 
 export interface Settings {
@@ -349,6 +445,11 @@ export interface Settings {
  * `screenshotEveryStep` is off because a screenshot on failure is the evidence
  * that matters; capturing every step costs a `captureVisibleTab` round trip per
  * step and fills the artifact budget with frames nobody opens.
+ *
+ * `resumeOnFailure` is on for `manual` only. Recovery is most valuable with a
+ * human watching, who can read the diagnosis and judge it; unattended it would
+ * turn a red schedule into a green one that nobody looks at. `chat` is included
+ * because it is the same person at the same keyboard.
  */
 export const DEFAULT_SETTINGS: Settings = {
   providers: [],
@@ -361,6 +462,8 @@ export const DEFAULT_SETTINGS: Settings = {
     screenshotEveryStep: false,
     selfHeal: false,
     autoSaveScript: true,
+    resumeOnFailure: ['manual'],
+    treatRecoveredAsPass: false,
   },
   feishu: {
     webhookUrl: '',
