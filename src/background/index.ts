@@ -74,7 +74,7 @@ import {
 } from './transcript'
 import { TICK_ALARM, installScheduler, onTick, refreshNextRun, resyncSchedules } from './scheduler'
 import { converse, type PendingChatAction } from './converse'
-import { conversation, toolEventToBroadcast } from './conversation'
+import { conversation, toolEventToBroadcast, applyConversationEvent, restoreConversation } from './conversation'
 import { chromeDeps, openContext } from './orchestrator'
 
 /**
@@ -756,7 +756,7 @@ async function handlePanelRequest(request: PanelRequest): Promise<PanelResponse>
       broadcast({ type: 'stateChanged' })
 
       const userText = request.message
-      broadcast({ type: 'convUser', text: userText, at: Date.now() })
+      emitConversation({ type: 'convUser', text: userText, at: Date.now() })
 
       // Not awaited: the panel gets its reply now and streams events afterward.
       void runConversation({
@@ -794,10 +794,14 @@ async function handlePanelRequest(request: PanelRequest): Promise<PanelResponse>
     }
 
     case 'clearConversation': {
-      conversation.reset()
-      broadcast({ type: 'convCleared', at: Date.now() })
+      emitConversation({ type: 'convCleared', at: Date.now() })
       broadcast({ type: 'stateChanged' })
       return { ok: true }
+    }
+
+    case 'getConversation': {
+      const transcript = await restoreConversation()
+      return { ok: true, conversation: transcript }
     }
 
     case 'listSkills': {
@@ -843,6 +847,20 @@ async function handlePanelRequest(request: PanelRequest): Promise<PanelResponse>
       return { ok: true, message: `已保存脚本「${script.name}」（${selected.length} 步）。` }
     }
   }
+}
+
+/**
+ * Broadcasts a conversation event and mirrors it into the persisted transcript.
+ *
+ * The panel gets the live event; the persisted copy is what a remounted tab (or
+ * a worker that was evicted and restarted) restores from, so the two must go
+ * through the same mutation in lockstep.
+ */
+function emitConversation(
+  event: Parameters<typeof applyConversationEvent>[0],
+): void {
+  applyConversationEvent(event)
+  broadcast(event)
 }
 
 /**
@@ -907,9 +925,9 @@ async function runConversation(params: {
       signal: controller.signal,
       onText: (delta) => {
         assistantText += delta
-        broadcast({ type: 'convAssistant', text: assistantText, at: Date.now() })
+        emitConversation({ type: 'convAssistant', text: assistantText, at: Date.now() })
       },
-      onStatus: (text) => broadcast({ type: 'convStatus', text, at: Date.now() }),
+      onStatus: (text) => emitConversation({ type: 'convStatus', text, at: Date.now() }),
       onPending: (action: PendingChatAction) => {
         conversation.pending = {
           id: action.id,
@@ -918,7 +936,7 @@ async function runConversation(params: {
           mutating: action.mutating,
           resolve: action.decide,
         }
-        broadcast({
+        emitConversation({
           type: 'convPending',
           pendingId: action.id,
           name: action.name,
@@ -928,7 +946,7 @@ async function runConversation(params: {
         })
       },
       onTool: (event) => {
-        broadcast({ ...toolEventToBroadcast(event, Date.now()) })
+        emitConversation(toolEventToBroadcast(event, Date.now()))
       },
     })
 
@@ -937,7 +955,7 @@ async function runConversation(params: {
     conversation.history = result.messages
     conversation.lastSteps = result.steps
     pruneConversationHistory()
-    broadcast({
+    emitConversation({
       type: 'convDone',
       steps: result.steps,
       ...(result.stoppedBecause ? { summary: result.stoppedBecause } : {}),
@@ -945,8 +963,8 @@ async function runConversation(params: {
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    broadcast({ type: 'convStatus', text: `出错：${message}`, at: Date.now() })
-    broadcast({ type: 'convDone', steps: conversation.lastSteps, summary: message, at: Date.now() })
+    emitConversation({ type: 'convStatus', text: `出错：${message}`, at: Date.now() })
+    emitConversation({ type: 'convDone', steps: conversation.lastSteps, summary: message, at: Date.now() })
   } finally {
     conversation.running = false
     conversation.pending = null
@@ -1085,3 +1103,6 @@ async function buildState(): Promise<PanelState> {
 // Keep the scheduler installed even if a previous incarnation never got the
 // chance; `installScheduler` is idempotent.
 void installScheduler()
+// Restore any in-progress conversation so a remounted panel or restarted worker
+// keeps the transcript rather than starting blank.
+void restoreConversation()

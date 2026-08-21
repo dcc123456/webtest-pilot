@@ -79,6 +79,7 @@ export type PanelRequest =
   | { type: 'getStorageUsage' }
   // --- Open-ended conversation -------------------------------------------
   | { type: 'converse'; message: string; skillId?: string | null; confirmMode?: ConfirmMode }
+  | { type: 'getConversation' }
   | { type: 'cancelConversation' }
   | { type: 'approveAction'; pendingId: string; approved: boolean }
   | { type: 'clearConversation' }
@@ -113,6 +114,46 @@ export interface PanelState {
   conversationActive: boolean
 }
 
+/**
+ * A persisted line in the open-ended conversation transcript.
+ *
+ * This is the *display* transcript (what the side panel renders), kept in
+ * `chrome.storage.session` so it survives tab switches and worker eviction. It
+ * is distinct from the model's wire history, which the worker also keeps but
+ * never sends to the panel. Tool results are stored as a preview string, not the
+ * full (possibly large) page text.
+ */
+export type ConversationEntry =
+  | { id: string; kind: 'user'; text: string; at: number }
+  | { id: string; kind: 'assistant'; text: string; at: number; streaming?: boolean }
+  | { id: string; kind: 'status'; text: string; at: number }
+  | {
+      id: string
+      kind: 'tool'
+      name: string
+      args: string
+      result: string
+      ok: boolean
+      declined?: boolean
+      durationMs: number
+      at: number
+    }
+  | {
+      id: string
+      kind: 'pending'
+      pendingId: string
+      name: string
+      args: string
+      mutating: boolean
+      at: number
+    }
+
+export interface ConversationTranscript {
+  entries: ConversationEntry[]
+  /** Recorded steps from the most recent completed turn, for save-as-script. */
+  lastSteps: ScriptStep[]
+}
+
 /** Worker → panel reply. Discriminated by the request that produced it. */
 export type PanelResponse =
   | { ok: true; state: PanelState }
@@ -126,6 +167,7 @@ export type PanelResponse =
   | { ok: true; usage: { storageBytes: number; artifactBytes: number; artifactCount: number } }
   | { ok: true; transcript: RunTranscript | null }
   | { ok: true; transcripts: RunTranscript[] }
+  | { ok: true; conversation: ConversationTranscript }
   | { ok: true; message: string }
   | { ok: true }
   | { ok: false; error: string }
@@ -267,6 +309,10 @@ export const is = {
     value.ok && 'transcript' in value,
   transcripts: (value: PanelResponse): value is { ok: true; transcripts: RunTranscript[] } =>
     value.ok && 'transcripts' in value,
+  conversation: (
+    value: PanelResponse,
+  ): value is { ok: true; conversation: ConversationTranscript } =>
+    value.ok && 'conversation' in value,
   message: (value: PanelResponse): value is { ok: true; message: string } =>
     value.ok && 'message' in value,
 }

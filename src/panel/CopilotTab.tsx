@@ -18,7 +18,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ConfirmMode, ScriptStep, Skill } from '../lib/types'
-import type { WorkerEvent } from '../lib/messages'
+import type { ConversationEntry, WorkerEvent } from '../lib/messages'
 import { is } from '../lib/messages'
 import {
   Badge,
@@ -32,34 +32,8 @@ import {
 import type { WorkerApi } from './useWorker'
 import { describeStep } from '../lib/script'
 
-/** One rendered transcript line. */
-type Entry =
-  | { id: string; kind: 'user'; text: string; at: number }
-  | { id: string; kind: 'assistant'; text: string; at: number; streaming?: boolean }
-  | { id: string; kind: 'status'; text: string; at: number }
-  | {
-      id: string
-      kind: 'tool'
-      name: string
-      args: string
-      result: string
-      ok: boolean
-      declined?: boolean
-      durationMs: number
-      at: number
-    }
-  | {
-      id: string
-      kind: 'pending'
-      pendingId: string
-      name: string
-      args: string
-      mutating: boolean
-      at: number
-    }
-
-let entryCounter = 0
-const nextId = (): string => `c${(entryCounter += 1)}`
+/** One rendered transcript line, matching the worker's persisted shape. */
+type Entry = ConversationEntry
 
 const CONFIRM_MODES: { value: ConfirmMode; label: string; hint: string }[] = [
   {
@@ -105,6 +79,34 @@ export function CopilotTab({ worker }: { worker: WorkerApi }) {
     [state.skills, activeSkillId],
   )
 
+  // Restore the persisted transcript on mount so switching tabs (which unmounts
+  // this component) no longer wipes the conversation. The worker is the source of
+  // truth; events streamed afterward merge in by id.
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const response = await call({ type: 'getConversation' })
+        if (cancelled || !is.conversation(response)) return
+        setEntries(response.conversation.entries)
+        if (response.conversation.lastSteps.length > 0) {
+          setLastSteps(response.conversation.lastSteps)
+          setSelectedSteps(
+            new Set(response.conversation.lastSteps.map((_, index) => index)),
+          )
+        }
+      } catch {
+        /* a restore failure leaves the tab empty; the next send still works */
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+    // Only run on mount: `call` is stable, and subsequent updates arrive via the
+    // subscription below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   // Apply incoming worker events to the local transcript.
   useEffect(() => {
     return subscribe((event: WorkerEvent) => {
@@ -112,7 +114,7 @@ export function CopilotTab({ worker }: { worker: WorkerApi }) {
         case 'convUser':
           setEntries((current) => [
             ...current,
-            { id: nextId(), kind: 'user', text: event.text, at: event.at },
+            { id: `u${event.at}`, kind: 'user', text: event.text, at: event.at },
           ])
           break
         case 'convAssistant': {
@@ -126,7 +128,13 @@ export function CopilotTab({ worker }: { worker: WorkerApi }) {
             }
             return [
               ...current,
-              { id: nextId(), kind: 'assistant', text: event.text, streaming: true, at: event.at },
+              {
+                id: `a${event.at}`,
+                kind: 'assistant',
+                text: event.text,
+                streaming: true,
+                at: event.at,
+              },
             ]
           })
           break
@@ -137,7 +145,7 @@ export function CopilotTab({ worker }: { worker: WorkerApi }) {
           if (event.text) {
             setEntries((current) => [
               ...current,
-              { id: nextId(), kind: 'status', text: event.text, at: event.at },
+              { id: `s${event.at}`, kind: 'status', text: event.text, at: event.at },
             ])
           } else {
             setEntries((current) =>
@@ -162,7 +170,7 @@ export function CopilotTab({ worker }: { worker: WorkerApi }) {
             return [
               ...withoutPending,
               {
-                id: nextId(),
+                id: event.id,
                 kind: 'tool',
                 name: event.name,
                 args: event.args,
@@ -180,7 +188,7 @@ export function CopilotTab({ worker }: { worker: WorkerApi }) {
           setEntries((current) => [
             ...current,
             {
-              id: nextId(),
+              id: event.pendingId,
               kind: 'pending',
               pendingId: event.pendingId,
               name: event.name,
