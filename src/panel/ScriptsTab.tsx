@@ -39,18 +39,19 @@ import {
 } from './components'
 import type { WorkerApi } from './useWorker'
 
-type ExportFormat = 'json' | 'playwright' | 'markdown'
+/**
+ * Formats that get a preview before download.
+ *
+ * The extension's own JSON is not among them: it now downloads directly, because
+ * a user asking for the script file wants the file, not a wall of JSON to read.
+ * These two are code and prose meant to be looked at before being taken away.
+ */
+type ExportFormat = 'playwright' | 'markdown'
 
 const FORMAT_META: Record<
   ExportFormat,
   { label: string; extension: string; mime: string; hint: string }
 > = {
-  json: {
-    label: 'JSON',
-    extension: 'json',
-    mime: 'application/json',
-    hint: '本插件自己的格式，可以通过本地接口（bridge）或数据导入重新载入。',
-  },
   playwright: {
     label: 'Playwright TS',
     extension: 'spec.ts',
@@ -77,8 +78,8 @@ export function ScriptsTab({
   const [exporting, setExporting] = useState<{ script: TestScript; format: ExportFormat } | null>(
     null,
   )
-  const [sharing, setSharing] = useState<TestScript[] | null>(null)
   const importRun = usePending()
+  const downloadRun = usePending()
   const toast = useToast()
 
   const caseNames = useMemo(() => {
@@ -92,11 +93,36 @@ export function ScriptsTab({
     [state.scripts],
   )
 
-  /** Reads a picked bundle file. Shared by the empty state and the toolbar. */
-  const importBundle = (text: string) =>
+  /**
+   * Downloads scripts as a file, with no preview step.
+   *
+   * The file is built in the worker (one implementation of the format) but lands
+   * straight in the download folder: what the user wants is the file, and sending
+   * it onward is a job for whatever tool they already use.
+   */
+  const downloadScripts = (chosen: TestScript[], fileName: string) =>
+    void downloadRun.run(async () => {
+      const response = await call({
+        type: 'exportScriptBundle',
+        scriptIds: chosen.map((script) => script.id),
+      })
+      if (!response.ok) {
+        toast.error(response.error)
+        return
+      }
+      if (!is.text(response)) {
+        toast.error('后台没有返回脚本内容。')
+        return
+      }
+      downloadText(fileName, response.text, 'application/json')
+      toast.success(`已下载 ${fileName}`)
+    })
+
+  /** Reads a picked script file. Shared by the empty state and the toolbar. */
+  const importScripts = (text: string) =>
     void importRun.run(async () => {
       const response = await call({ type: 'importScriptBundle', json: text })
-      // A rejected bundle carries the reason — a bad file must not be reported as
+      // A rejected file carries the reason — a bad file must not be reported as
       // a success just because the message channel worked.
       if (!response.ok) {
         toast.error(response.error)
@@ -110,7 +136,7 @@ export function ScriptsTab({
       accept='application/json,.json'
       label='导入脚本…'
       pending={importRun.pending}
-      onText={importBundle}
+      onText={importScripts}
       onError={(message) => toast.error(`读取文件失败：${message}`)}
     />
   )
@@ -123,10 +149,10 @@ export function ScriptsTab({
           hint='当智能体（agent）运行通过后，会自动把它录制成可回放的脚本（需要在「设置 → 运行策略」里开启「自动保存脚本」）。回放脚本不调用模型，结果确定。'
         />
         {/* Import belongs here too: an empty list is exactly when someone is most
-            likely to be loading a colleague's scripts. */}
+            likely to be loading scripts they were sent. */}
         <div className='row'>{importButton}</div>
         <span className='faint small'>
-          也可以导入别人分享的脚本文件（.json）。导入的脚本一律作为新脚本加入，不会覆盖你已有的脚本。
+          可以导入下载过的脚本文件（.json）。导入的脚本一律作为新脚本加入，不会覆盖你已有的脚本。
         </span>
       </div>
     )
@@ -136,8 +162,14 @@ export function ScriptsTab({
     <div className='stack'>
       <div className='row'>
         {importButton}
-        <Button small onClick={() => setSharing(scripts)}>
-          导出全部（{scripts.length}）
+        <Button
+          small
+          pending={downloadRun.pending}
+          onClick={() =>
+            downloadScripts(scripts, `webtest-pilot-scripts-${scripts.length}.json`)
+          }
+        >
+          下载全部（{scripts.length}）
         </Button>
       </div>
 
@@ -150,7 +182,7 @@ export function ScriptsTab({
           onToggle={(next) => setExpanded((current) => ({ ...current, [script.id]: next }))}
           worker={worker}
           onExport={(format) => setExporting({ script, format })}
-          onShare={() => setSharing([script])}
+          onDownload={() => downloadScripts([script], safeFileName(script.name, 'json'))}
           onOpenRun={onOpenRun}
         />
       ))}
@@ -163,10 +195,6 @@ export function ScriptsTab({
           onClose={() => setExporting(null)}
         />
       ) : null}
-
-      {sharing ? (
-        <ShareView scripts={sharing} call={call} onClose={() => setSharing(null)} />
-      ) : null}
     </div>
   )
 }
@@ -178,7 +206,7 @@ function ScriptRow({
   onToggle,
   worker,
   onExport,
-  onShare,
+  onDownload,
   onOpenRun,
 }: {
   script: TestScript
@@ -187,7 +215,7 @@ function ScriptRow({
   onToggle: (next: boolean) => void
   worker: WorkerApi
   onExport: (format: ExportFormat) => void
-  onShare: () => void
+  onDownload: () => void
   onOpenRun: (runId: string) => void
 }) {
   const { call } = worker
@@ -256,11 +284,8 @@ function ScriptRow({
         >
           回放
         </Button>
-        <Button small onClick={onShare}>
-          分享…
-        </Button>
-        <Button small onClick={() => onExport('json')}>
-          导出 JSON
+        <Button small onClick={onDownload}>
+          下载脚本
         </Button>
         <Button small onClick={() => onExport('playwright')}>
           导出 Playwright
@@ -371,103 +396,6 @@ function ExportView({
       <div className='stack'>
         <span className='faint small'>{meta.hint}</span>
         <Truncated text={fileName} className='faint small' mono />
-        {error !== null ? <span className='field__error'>{error}</span> : null}
-        {text === null && error === null ? <span className='dim small'>正在生成…</span> : null}
-        {text !== null ? <pre className='pre'>{text}</pre> : null}
-      </div>
-    </Modal>
-  )
-}
-
-/**
- * Builds a shareable bundle and shows what it will and will not contain.
- *
- * The disclosure is not decoration: a user about to paste this into a group chat
- * needs to know, before they send it, that credentials are not in the file. Saying
- * so at the moment of sharing is worth more than a line in the README.
- */
-function ShareView({
-  scripts,
-  call,
-  onClose,
-}: {
-  scripts: TestScript[]
-  call: WorkerApi['call']
-  onClose: () => void
-}) {
-  const [text, setText] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-
-  useEffect(() => {
-    let cancelled = false
-    setText(null)
-    setError(null)
-    call({ type: 'exportScriptBundle', scriptIds: scripts.map((script) => script.id) })
-      .then((response) => {
-        if (cancelled) return
-        if (is.text(response)) setText(response.text)
-        else setError(response.ok ? '后台没有返回导出内容。' : response.error)
-      })
-      .catch((cause: unknown) => {
-        if (cancelled) return
-        setError(cause instanceof Error ? cause.message : String(cause))
-      })
-    return () => {
-      cancelled = true
-    }
-    // Depending on the id list rather than the array identity: a new array with
-    // the same ids must not refetch.
-  }, [call, scripts.map((script) => script.id).join(',')])
-
-  const secretNames = useMemo(() => {
-    const names = new Set<string>()
-    for (const script of scripts) {
-      for (const step of script.steps) {
-        if (step.secretRef) names.add(step.secretRef)
-      }
-    }
-    return [...names].sort()
-  }, [scripts])
-
-  const fileName =
-    scripts.length === 1 && scripts[0]
-      ? safeFileName(scripts[0].name, 'wtp.json')
-      : `webtest-pilot-scripts-${scripts.length}.wtp.json`
-
-  return (
-    <Modal
-      title={scripts.length === 1 ? '分享脚本' : `分享 ${scripts.length} 个脚本`}
-      onClose={onClose}
-      footer={
-        <>
-          {text !== null ? <CopyButton text={text} label='复制' small={false} /> : null}
-          {text !== null ? (
-            <Button variant='primary' onClick={() => downloadText(fileName, text, 'application/json')}>
-              下载文件
-            </Button>
-          ) : null}
-          <Button variant='ghost' onClick={onClose}>
-            关闭
-          </Button>
-        </>
-      }
-    >
-      <div className='stack'>
-        <span className='faint small'>
-          把这个文件发给同事，对方在「脚本」页点「导入脚本…」即可使用。会一并带上脚本关联的测试用例，
-          这样对方能看到这个脚本本来要验证什么。
-        </span>
-        <Truncated text={fileName} className='faint small' mono />
-
-        <div className='stack' style={{ gap: 2 }}>
-          <span className='dim small'>不会包含：API Key、密钥的真实值、bridge 令牌、运行历史、定时任务。</span>
-          {secretNames.length > 0 ? (
-            <span className='dim small'>
-              需要对方自行配置的密钥（只带名字，不带值）：<code>{secretNames.join('、')}</code>
-            </span>
-          ) : null}
-        </div>
-
         {error !== null ? <span className='field__error'>{error}</span> : null}
         {text === null && error === null ? <span className='dim small'>正在生成…</span> : null}
         {text !== null ? <pre className='pre'>{text}</pre> : null}

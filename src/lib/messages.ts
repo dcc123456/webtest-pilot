@@ -51,9 +51,9 @@ export type PanelRequest =
   | { type: 'saveScript'; script: TestScript }
   | { type: 'deleteScript'; scriptId: string }
   | { type: 'exportScript'; scriptId: string; format: 'json' | 'playwright' | 'markdown' }
-  /** Builds a shareable bundle. Empty `scriptIds` means every script. */
+  /** Builds a downloadable script file. Empty `scriptIds` means every script. */
   | { type: 'exportScriptBundle'; scriptIds: string[] }
-  /** Reads a shared bundle, always creating new scripts rather than overwriting. */
+  /** Reads a downloaded script file, always creating new scripts rather than overwriting. */
   | { type: 'importScriptBundle'; json: string }
   | { type: 'deleteRun'; runId: string }
   | { type: 'clearRuns' }

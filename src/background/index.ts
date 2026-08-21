@@ -490,8 +490,8 @@ async function handlePanelRequest(request: PanelRequest): Promise<PanelResponse>
       if (parsed.cases.length > 0) await saveCases(parsed.cases)
       await saveScripts(parsed.scripts)
 
-      // Report secrets the bundle needs but this profile lacks. Without this the
-      // recipient discovers the gap when a run fails partway through a login.
+      // Report secrets the file needs but this profile lacks. Without this the
+      // gap is discovered when a run fails partway through a login.
       const have = new Set((await getSecrets()).map((entry) => entry.name))
       const missing = parsed.requiredSecrets.filter((name) => !have.has(name))
 
@@ -505,7 +505,7 @@ async function handlePanelRequest(request: PanelRequest): Promise<PanelResponse>
       await appendLog({
         level: 'info',
         source: 'import',
-        message: `导入脚本分享包：${parsed.scripts.length} 个脚本、${parsed.cases.length} 个用例。`,
+        message: `导入脚本文件：${parsed.scripts.length} 个脚本、${parsed.cases.length} 个用例。`,
       })
       return { ok: true, message }
     }

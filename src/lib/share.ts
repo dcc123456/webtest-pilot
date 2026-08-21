@@ -1,17 +1,19 @@
 /**
- * Script sharing: a self-contained bundle one person can hand to another.
+ * Script files: download a script, import one back.
  *
  * Distinct from `exportAll` in `lib/storage`, which is a whole-profile backup for
- * one user restoring their own data. A share is the opposite errand: a few scripts
- * leaving this machine for someone else's, so it carries the cases they were
- * recorded from (otherwise the recipient sees steps with no statement of what they
- * are supposed to prove) and deliberately carries nothing else.
+ * one user restoring their own data. This is the narrower errand: a few scripts
+ * written to a file the user can do whatever they like with — send it, commit it,
+ * archive it. Passing it on is deliberately not this tool's job.
  *
- * What a bundle must never contain is the point of the format: no secret values,
- * no API keys, no bridge token, no run history, no schedules. A shared file tends
- * to end up in a chat message or a git repository, so anything sensitive in it is
+ * The file carries the cases the scripts were recorded from, because steps alone
+ * do not say what they are supposed to prove.
+ *
+ * What it must never contain is the point of the format: no secret values, no API
+ * keys, no bridge token, no run history, no schedules. A downloaded file tends to
+ * end up in a chat message or a git repository, so anything sensitive in it is
  * effectively published. Secrets survive as `secretRef` *names*, which tell the
- * recipient which credentials to create locally without revealing any.
+ * reader which credentials to create locally without revealing any.
  *
  * @module lib/share
  */
@@ -28,10 +30,10 @@ import type { TestCase, TestScript } from './types'
  */
 export const BUNDLE_VERSION = 1
 
-/** Identifies a file as a share bundle rather than some other JSON. */
+/** Identifies a file as a script file from this extension rather than some other JSON. */
 export const BUNDLE_KIND = 'webtest-pilot/scripts'
 
-/** A shareable set of scripts with the cases they came from. */
+/** A set of scripts with the cases they came from. */
 export interface ShareBundle {
   kind: typeof BUNDLE_KIND
   bundleVersion: number
@@ -40,11 +42,11 @@ export interface ShareBundle {
   /** Cases referenced by the scripts, so the intent travels with the steps. */
   cases: TestCase[]
   /**
-   * Secret names the scripts reference, collected for the recipient's benefit.
+   * Secret names the scripts reference, collected for whoever imports the file.
    *
    * Names only — never values. Present so an importer can say "this needs a
-   * secret called LOGIN_PW" up front, instead of the recipient discovering it
-   * when a run fails midway.
+   * secret called LOGIN_PW" up front, instead of that being discovered when a run
+   * fails midway.
    */
   requiredSecrets: string[]
 }
@@ -102,14 +104,14 @@ export function toBundleJson(bundle: ShareBundle): string {
 }
 
 /**
- * Reads a bundle, assigning fresh ids to everything it contains.
+ * Reads a script file, assigning fresh ids to everything it contains.
  *
- * Fresh ids unconditionally, never merge-by-id. A bundle comes from someone
- * else's machine, where ids were minted independently, so a collision means two
- * unrelated scripts — and silently replacing the recipient's own work with a
- * stranger's would be the worst possible reading of "import". The cost is that
- * importing the same file twice gives two copies, which is visible and
- * correctable; the alternative destroys data.
+ * Fresh ids unconditionally, never merge-by-id. The file may come from another
+ * machine, where ids were minted independently, so a collision means two
+ * unrelated scripts — and silently replacing the user's own work with an imported
+ * one would be the worst possible reading of "import". The cost is that importing
+ * the same file twice gives two copies, which is visible and correctable; the
+ * alternative destroys data.
  *
  * `caseId` links are rewritten to the new case ids, so an imported script still
  * knows which imported case it belongs to.
@@ -127,13 +129,13 @@ export function parseBundle(
     throw new Error(`不是合法的 JSON：${error instanceof Error ? error.message : String(error)}`)
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    throw new Error('分享包必须是一个 JSON 对象。')
+    throw new Error('脚本文件必须是一个 JSON 对象。')
   }
   const bag = raw as Partial<ShareBundle> & { steps?: unknown }
 
-  // A bare single-script file is accepted too: it is what the existing "导出
-  // JSON" button produces, and refusing the format this tool already emits would
-  // be a gratuitous trap.
+  // A bare single-script file is accepted too: older versions of this extension
+  // emitted that shape, and refusing a format this tool once produced would be a
+  // gratuitous trap.
   if (bag.kind === undefined && Array.isArray(bag.steps)) {
     const script = parseScriptJson(text, () => idFactory('script'))
     // A lone script's caseId points at a case that is not in this file, so drop
@@ -144,20 +146,20 @@ export function parseBundle(
 
   if (bag.kind !== BUNDLE_KIND) {
     throw new Error(
-      `这个文件不是 WebTest Pilot 的脚本分享包（缺少 kind: "${BUNDLE_KIND}"）。` +
+      `这个文件不是 WebTest Pilot 的脚本文件（缺少 kind: "${BUNDLE_KIND}"）。` +
         '如果你要恢复自己的完整备份，请用「设置 → 数据导入」。',
     )
   }
   if (typeof bag.bundleVersion !== 'number') {
-    throw new Error('分享包缺少 bundleVersion 字段。')
+    throw new Error('这个脚本文件缺少 bundleVersion 字段。')
   }
   if (bag.bundleVersion > BUNDLE_VERSION) {
     throw new Error(
-      `这个分享包的格式版本是 ${bag.bundleVersion}，当前插件只支持到 ${BUNDLE_VERSION}。请升级插件后再导入。`,
+      `这个脚本文件的格式版本是 ${bag.bundleVersion}，当前插件只支持到 ${BUNDLE_VERSION}。请升级插件后再导入。`,
     )
   }
   if (!Array.isArray(bag.scripts) || bag.scripts.length === 0) {
-    throw new Error('分享包里没有任何脚本。')
+    throw new Error('这个文件里没有任何脚本。')
   }
 
   // Old case id -> new case id, so script.caseId can be rewritten.

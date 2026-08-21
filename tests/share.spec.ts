@@ -1,13 +1,13 @@
 /**
- * Share bundle tests.
+ * Script file tests.
  *
  * Two properties matter more than the rest and are pinned hardest:
  *
- * 1. A bundle leaks nothing. Shared files land in chat messages and git repos, so
- *    a secret value in one is effectively published.
- * 2. An import never overwrites the recipient's own work. Ids from another machine
- *    are unrelated to local ones, so merging by id would silently replace a
- *    stranger's script over yours.
+ * 1. The file leaks nothing. Downloaded files land in chat messages and git repos,
+ *    so a secret value in one is effectively published.
+ * 2. An import never overwrites the user's own work. Ids from another machine are
+ *    unrelated to local ones, so merging by id would let an imported script
+ *    silently replace theirs.
  */
 
 import { describe, expect, it } from 'vitest'
@@ -60,7 +60,7 @@ function testCase(overrides: Partial<TestCase> = {}): TestCase {
   }
 }
 
-describe('what a bundle carries', () => {
+describe('what a script file carries', () => {
   it('includes only the cases the exported scripts reference', () => {
     const bundle = buildBundle(
       [script({ caseId: 'their-case-1' })],
@@ -75,7 +75,7 @@ describe('what a bundle carries', () => {
     expect(bundle.cases).toEqual([])
   })
 
-  it('lists the secret names a script needs, so the recipient can create them', () => {
+  it('lists the secret names a script needs, so they can be created locally', () => {
     const steps: ScriptStep[] = [
       { action: 'fill', target, secretRef: 'LOGIN_PW' },
       { action: 'fill', target, secretRef: 'API_TOKEN' },
@@ -102,7 +102,7 @@ describe('what a bundle carries', () => {
     expect(bundle.cases[0]).not.toHaveProperty('scriptId')
   })
 
-  it('is identifiable as a share bundle', () => {
+  it('is identifiable as this extension\'s script file', () => {
     const bundle = buildBundle([script()], [])
     expect(bundle.kind).toBe(BUNDLE_KIND)
     expect(bundle.bundleVersion).toBe(BUNDLE_VERSION)
@@ -113,7 +113,7 @@ describe('importing never overwrites local work', () => {
   it('assigns a fresh id even when the file carries one', () => {
     const json = toBundleJson(buildBundle([script({ id: 'their-script-1' })], []))
     const result = parseBundle(json, ids())
-    // The failure this prevents: a colleague's bundle replacing your own script
+    // The failure this prevents: an imported file replacing your own script
     // because both machines happened to mint the same id.
     expect(result.scripts[0]?.id).toBe('new-script-1')
     expect(result.scripts[0]?.id).not.toBe('their-script-1')
@@ -184,7 +184,7 @@ describe('importing never overwrites local work', () => {
 })
 
 describe('accepting a plain single-script file', () => {
-  it('reads the format the existing "导出 JSON" button produces', () => {
+  it('reads the bare single-script shape older versions produced', () => {
     // Refusing the shape this tool already emits would be a gratuitous trap.
     const json = JSON.stringify({
       version: 1,
