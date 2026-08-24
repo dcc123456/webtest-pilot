@@ -1,0 +1,94 @@
+name: Release
+
+# Build a loadable Chrome extension zip and attach it to a GitHub Release
+# whenever a version tag is pushed. Tag like `v0.2.0`; the tag body becomes the
+# release notes. The zip keeps a top-level `dist/` folder to match the manually
+# packaged `webtest-pilot.zip`, so "Load unpacked" points at that folder.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build (e.g. v0.2.0). Only used for manual reruns.'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build extension zip
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Resolve tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+            git fetch --depth=1 origin "refs/tags/${TAG}:refs/tags/${TAG}"
+            git checkout "refs/tags/${TAG}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          NAME="webtest-pilot-${TAG}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "Building ${TAG}"
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          # pnpm-lock.yaml is committed, so let pnpm/action-setup run install.
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11
+          run_install: true
+
+      - name: Typecheck and test
+        run: |
+          pnpm run typecheck
+          pnpm run test
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Package zip
+        id: package
+        run: |
+          set -euo pipefail
+          ASSET="${{ steps.meta.outputs.name }}.zip"
+          mkdir -p release
+          # Include the built extension plus the license; keep the top-level
+          # `dist/` directory so users can load it directly after unzipping.
+          cp LICENSE dist/LICENSE
+          zip -qr "release/${ASSET}" dist
+          unzip -l "release/${ASSET}" | sed -n '1,20p'
+          echo "asset=${ASSET}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.name }}
+          path: release/${{ steps.package.outputs.asset }}
+          if-no-files-found: error
+
+      - name: Create or update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag }}
+          name: WebTest Pilot ${{ steps.meta.outputs.tag }}
+          files: release/${{ steps.package.outputs.asset }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(steps.meta.outputs.tag, '-') }}

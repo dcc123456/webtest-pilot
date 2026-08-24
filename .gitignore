@@ -11,5 +11,7 @@ Thumbs.db
 coverage/
 # Packaged extension for manual loading; rebuilt from source, never reviewed.
 *.zip
+# CI/local release output directory.
+release/
 # Local bridge state: generated auth token, run history, screenshots.
 .webtest-pilot/
