@@ -50,7 +50,24 @@
 
 ## 安装
 
-需要 Node.js 20+ 和 Chrome 116+。
+需要 Chrome 116+。两种方式任选其一：**用 Release 包**（推荐，普通用户不需要装 Node），或从源码构建。
+
+### 方式一：下载 Release 包（推荐）
+
+到 [Releases 页面](https://github.com/dcc123456/webtest-pilot/releases) 下载最新版本的 `webtest-pilot-v<版本>.zip`，解压后得到一个 `dist/` 目录。
+
+然后在 Chrome 中加载：
+
+1. 打开 `chrome://extensions`
+2. 右上角开启「开发者模式」
+3. 点「加载已解压的扩展程序」，选择解压出来的 **`dist` 目录**
+4. 点击工具栏图标打开侧边栏
+
+> Release 包由 CI 自动构建：每打一个 `v*` tag 就会在 GitHub Actions 里跑测试、构建并把 zip 附到 Release 上，zip 内是带版本号的 `manifest.json`。你不需要安装任何依赖就能使用。
+
+### 方式二：从源码构建
+
+需要 Node.js 20+。
 
 ```bash
 cd webtest-pilot
@@ -58,12 +75,7 @@ pnpm install --ignore-scripts
 pnpm build
 ```
 
-然后在 Chrome 中加载：
-
-1. 打开 `chrome://extensions`
-2. 右上角开启「开发者模式」
-3. 点「加载已解压的扩展程序」，选择 `webtest-pilot/dist` 目录
-4. 点击工具栏图标打开侧边栏
+然后同样在 `chrome://extensions` 里「加载已解压的扩展程序」，选择 `webtest-pilot/dist` 目录。
 
 > `--ignore-scripts` 是因为部分环境下 esbuild 的 postinstall 会因权限失败；跳过它不影响使用。
 
@@ -244,7 +256,7 @@ AI 自己也会在关键节点截图（比如渲染异常、图表这种断言�
 
 对话里模型实际执行并经你确认的有效动作（点击、填写等）会被录制下来。一轮结束后，输入框上方会出现「把这轮操作存为脚本」：可以**逐条勾选**要保留的步骤，命名后保存为可回放的测试脚本（密钥仍只存引用）。这样一次探索性的手动操作就能沉淀成回归脚本。
 
-> 对话记录在 service worker 内存中，用于多轮上下文；worker 被回收会清空。这与测试运行不同——运行是持久化记录。
+> 对话记录保存在 `chrome.storage.session`，切换侧边栏标签或 service worker 被回收后仍会保留；浏览器关闭时清空。这与测试运行不同——运行是持久化记录。
 
 ### 技能（Skills）
 
@@ -401,6 +413,7 @@ https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx
 跑通的用例会自动保存成 JSON 步骤脚本（可在设置里关掉）。「脚本」标签里可以：
 
 - 查看每一步的可读描述
+- **编辑步骤**：启用/禁用单个步骤（禁用的步骤保留在脚本里、回放时跳过并记为 skipped）、删除步骤、调整顺序、重命名脚本
 - **下载脚本**（`.json`，可再导入回来，见下）
 - 导出 **Playwright TypeScript**（脱离本插件，进你现有的 e2e 工程）
 - 导出 **Markdown**（评审用）
