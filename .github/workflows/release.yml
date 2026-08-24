@@ -54,6 +54,11 @@ jobs:
           version: 11
           run_install: true
 
+      - name: Sync manifest version from tag
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: node scripts/sync-version.mjs
+
       - name: Typecheck and test
         run: |
           pnpm run typecheck
